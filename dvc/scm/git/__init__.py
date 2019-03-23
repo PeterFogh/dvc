@@ -2,17 +2,18 @@
 
 from __future__ import unicode_literals
 
-# NOTE: need this one because python 2 would re-import this module
-# (called git.py) instead of importing gitpython's git module.
-from __future__ import absolute_import
-
-from dvc.utils.compat import str, open
-
 import os
 
-import dvc.logger as logger
+from dvc.utils.compat import str, open
 from dvc.utils import fix_env
-from dvc.scm.base import Base, SCMError, FileNotInRepoError
+from dvc.scm.base import (
+    Base,
+    SCMError,
+    FileNotInRepoError,
+    FileNotInTargetSubdirError,
+)
+from dvc.scm.git.tree import GitTree
+import dvc.logger as logger
 
 
 class Git(Base):
@@ -62,28 +63,47 @@ class Git(Base):
     def ignore_file(self):
         return self.GITIGNORE
 
-    def _get_gitignore(self, path):
-        assert os.path.isabs(path)
-        # NOTE: using '/' prefix to make path unambiguous
-        entry = "/" + os.path.basename(path)
-        gitignore = os.path.join(os.path.dirname(path), self.GITIGNORE)
+    def _get_gitignore(self, path, ignore_file_dir=None):
+        if not ignore_file_dir:
+            ignore_file_dir = os.path.dirname(os.path.realpath(path))
 
-        if not gitignore.startswith(self.root_dir):
+        assert os.path.isabs(path)
+        assert os.path.isabs(ignore_file_dir)
+
+        if not path.startswith(ignore_file_dir):
+            msg = (
+                "{} file has to be located in one of '{}' subdirectories"
+                ", not outside '{}'"
+            )
+            raise FileNotInTargetSubdirError(
+                msg.format(self.GITIGNORE, path, ignore_file_dir)
+            )
+
+        entry = os.path.relpath(path, ignore_file_dir).replace(os.sep, "/")
+        # NOTE: using '/' prefix to make path unambiguous
+        if len(entry) > 0 and entry[0] != "/":
+            entry = "/" + entry
+
+        gitignore = os.path.join(ignore_file_dir, self.GITIGNORE)
+
+        if not gitignore.startswith(os.path.realpath(self.root_dir)):
             raise FileNotInRepoError(path)
 
         return entry, gitignore
 
-    def ignore(self, path):
-        entry, gitignore = self._get_gitignore(path)
+    def ignore(self, path, in_curr_dir=False):
+        base_dir = (
+            os.path.realpath(os.curdir)
+            if in_curr_dir
+            else os.path.dirname(path)
+        )
+        entry, gitignore = self._get_gitignore(path, base_dir)
 
         ignore_list = []
         if os.path.exists(gitignore):
             with open(gitignore, "r") as f:
                 ignore_list = f.readlines()
-            filtered = list(
-                filter(lambda x: x.strip() == entry.strip(), ignore_list)
-            )
-            if filtered:
+            if any(filter(lambda x: x.strip() == entry.strip(), ignore_list)):
                 return
 
         msg = "Adding '{}' to '{}'.".format(
@@ -91,16 +111,19 @@ class Git(Base):
         )
         logger.info(msg)
 
-        content = entry
-        if ignore_list:
-            content = "\n" + content
-
-        with open(gitignore, "a") as fobj:
-            fobj.write(content)
+        self._add_entry_to_gitignore(entry, gitignore, ignore_list)
 
         self.track_file(os.path.relpath(gitignore))
 
         self.ignored_paths.append(path)
+
+    @staticmethod
+    def _add_entry_to_gitignore(entry, gitignore, ignore_list):
+        content = entry
+        if ignore_list:
+            content = "\n" + content
+        with open(gitignore, "a", encoding="utf-8") as fobj:
+            fobj.write(content)
 
     def ignore_remove(self, path):
         entry, gitignore = self._get_gitignore(path)
@@ -153,7 +176,13 @@ class Git(Base):
         return [os.path.join(self.git.working_dir, fname) for fname in files]
 
     def is_tracked(self, path):
-        return len(self.git.git.ls_files(path)) != 0
+        # it is equivalent to `bool(self.git.git.ls_files(path))` by
+        # functionality, but ls_files fails on unicode filenames
+        path = os.path.relpath(path, self.root_dir)
+        return path in [i[0] for i in self.git.index.entries]
+
+    def is_dirty(self):
+        return self.git.is_dirty()
 
     def active_branch(self):
         return self.git.active_branch.name
@@ -203,3 +232,6 @@ class Git(Base):
         basename = os.path.basename(path)
         path_parts = os.path.normpath(path).split(os.path.sep)
         return basename == self.ignore_file or Git.GIT_DIR in path_parts
+
+    def get_tree(self, rev):
+        return GitTree(self.git, rev)

@@ -20,7 +20,15 @@ from dvc.remote.base import (
     STATUS_DELETED,
     STATUS_MISSING,
 )
-from dvc.utils import remove, move, copyfile, dict_md5, to_chunks, tmp_fname
+from dvc.utils import (
+    remove,
+    move,
+    copyfile,
+    dict_md5,
+    to_chunks,
+    tmp_fname,
+    walk_files,
+)
 from dvc.utils import LARGE_DIR_SIZE
 from dvc.config import Config
 from dvc.exceptions import DvcException
@@ -291,17 +299,22 @@ class RemoteLOCAL(RemoteBase):
     def is_dir_cache(cls, cache):
         return cache.endswith(cls.MD5_DIR_SUFFIX)
 
-    def do_checkout(self, path_info, checksum, force=False):
+    def do_checkout(self, output, force=False, progress_callback=None):
+        path_info = output.path_info
+        checksum = output.info.get(self.PARAM_CHECKSUM)
+
         path = path_info["path"]
         md5 = checksum
         cache = self.get(md5)
 
-        if not self.is_dir_cache(cache):
+        if not output.is_dir_cache:
             if os.path.exists(path):
                 self.safe_remove(path_info, force=force)
 
             self.link(cache, path)
             self.state.update_link(path)
+            if progress_callback:
+                progress_callback.update(os.path.relpath(path))
             return
 
         # Create dir separately so that dir is created
@@ -309,12 +322,10 @@ class RemoteLOCAL(RemoteBase):
         if not os.path.exists(path):
             os.makedirs(path)
 
-        dir_info = self.load_dir_cache(md5)
+        dir_info = output.dir_cache
         dir_relpath = os.path.relpath(path)
-        dir_size = len(dir_info)
-        bar = dir_size > LARGE_DIR_SIZE
 
-        logger.info("Linking directory '{}'.".format(dir_relpath))
+        logger.debug("Linking directory '{}'.".format(dir_relpath))
 
         for processed, entry in enumerate(dir_info):
             relpath = entry[self.PARAM_RELPATH]
@@ -332,15 +343,12 @@ class RemoteLOCAL(RemoteBase):
 
                 self.link(c, p)
 
-            if bar:
-                progress.update_target(dir_relpath, processed, dir_size)
+            if progress_callback:
+                progress_callback.update(os.path.relpath(p))
 
         self._discard_working_directory_changes(path, dir_info, force=force)
 
         self.state.update_link(path)
-
-        if bar:
-            progress.finish_target(dir_relpath)
 
     def already_cached(self, path_info):
         assert path_info["scheme"] in ["", "local"]
@@ -353,11 +361,7 @@ class RemoteLOCAL(RemoteBase):
         return not self.changed_cache(current_md5)
 
     def _discard_working_directory_changes(self, path, dir_info, force=False):
-        working_dir_files = set(
-            os.path.join(root, file)
-            for root, _, files in os.walk(str(path))
-            for file in files
-        )
+        working_dir_files = set(path for path in walk_files(path))
 
         cached_files = set(
             os.path.join(path, file["relpath"]) for file in dir_info

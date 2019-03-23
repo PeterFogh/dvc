@@ -1,5 +1,6 @@
 from dvc.repo import Repo
-from dvc.scm import scm_context, Base
+from dvc.repo.scm_context import scm_context
+from dvc.scm import NoSCM
 from unittest import TestCase
 import mock
 
@@ -7,7 +8,7 @@ import mock
 class TestScmContext(TestCase):
     def setUp(self):
         self.repo_mock = mock.Mock(spec=Repo)
-        self.scm_mock = mock.Mock(spec=Base)
+        self.scm_mock = mock.Mock(spec=NoSCM)
         self.repo_mock.scm = self.scm_mock
 
     def test_should_successfully_perform_method(self):

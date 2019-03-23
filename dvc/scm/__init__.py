@@ -5,7 +5,11 @@ from __future__ import unicode_literals
 from dvc.scm.base import Base
 from dvc.scm.git import Git
 
-import dvc
+
+# just a sugar to point that this is an actual implementation for a dvc
+# project under no SCM control
+class NoSCM(Base):
+    pass
 
 
 def SCM(root_dir, repo=None):  # pylint: disable=invalid-name
@@ -22,20 +26,4 @@ def SCM(root_dir, repo=None):  # pylint: disable=invalid-name
     if Git.is_repo(root_dir) or Git.is_submodule(root_dir):
         return Git(root_dir, repo=repo)
 
-    return Base(root_dir, repo=repo)
-
-
-def scm_context(method):
-    def run(*args, **kw):
-        repo = args[0]
-        assert isinstance(repo, dvc.repo.Repo)
-        try:
-            result = method(*args, **kw)
-            repo.scm.reset_ignores()
-            repo.scm.remind_to_track()
-            return result
-        except Exception as e:
-            repo.scm.cleanup_ignores()
-            raise e
-
-    return run
+    return NoSCM(root_dir, repo=repo)

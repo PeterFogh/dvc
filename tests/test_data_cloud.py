@@ -628,8 +628,7 @@ class TestWarnOnOutdatedStage(TestDvc):
         url = get_local_url()
         self.main(["remote", "add", "-d", TEST_REMOTE, url])
 
-        self.dvc.add(self.FOO)
-        stage = self.dvc.run(deps=["foo"], outs=["bar"], cmd="echo bar > bar")
+        stage = self.dvc.run(outs=["bar"], cmd="echo bar > bar")
         self.main(["push"])
 
         stage_file_path = stage.relpath
@@ -675,7 +674,7 @@ class TestRecursiveSyncOperations(TestDataCloudBase):
         )
 
         self.dvc.add(self.DATA)
-        self.dvc.add(self.DATA_SUB_CONTENTS)
+        self.dvc.add(self.DATA_SUB)
 
     def _remove_local_data_files(self):
         os.remove(self.DATA)

@@ -22,6 +22,10 @@ def info(message):
     logger.info(message)
 
 
+# Do not annotate debug with progress_aware. Why? Debug messages are called
+# in analytics.py. Trigger introduced by @progress_aware may run even
+# if log_level != DEBUG (look at Progress.print) Which might result in
+# messy terminal after any command (because analytics run in separate thread)
 def debug(message):
     """Prints a debug message."""
     prefix = colorize("Debug", color="blue")
@@ -203,16 +207,16 @@ def colorize(message, color=None):
     )
 
 
-def _init_colorama():
-    colorama.init()
-
-
 def set_default_level():
     """Sets default log level."""
     logger.setLevel(logging.INFO)
 
 
 def _add_handlers():
+    # NOTE: We need to initialize colorama before setting the stream handlers
+    #       so it can wrap stdout/stderr and convert color codes to Windows.
+    colorama.init()
+
     formatter = "%(message)s"
 
     class _LogLevelFilter(logging.Filter):
@@ -309,4 +313,3 @@ logger = logging.getLogger("dvc")  # pylint: disable=invalid-name
 
 set_default_level()
 _add_handlers()
-_init_colorama()
