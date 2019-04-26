@@ -1,8 +1,12 @@
 from __future__ import unicode_literals
 
-import dvc.logger as logger
-from dvc.exceptions import DvcException
+import logging
+
+from dvc.exceptions import CheckoutErrorSuggestGit
 from dvc.progress import ProgressCallback
+
+
+logger = logging.getLogger(__name__)
 
 
 def _cleanup_unused_links(self, all_stages):
@@ -27,17 +31,14 @@ def get_progress_callback(stages):
 def checkout(self, target=None, with_deps=False, force=False, recursive=False):
     from dvc.stage import StageFileDoesNotExistError, StageFileBadNameError
 
-    if target and not recursive:
-        all_stages = self.active_stages()
-        try:
-            stages = self.collect(target, with_deps=with_deps)
-        except (StageFileDoesNotExistError, StageFileBadNameError) as exc:
-            raise DvcException(
-                str(exc) + " Did you mean 'git checkout {}'?".format(target)
-            )
-    else:
-        all_stages = self.active_stages(target)
-        stages = all_stages
+    all_stages = self.stages()
+
+    try:
+        stages = self.collect(target, with_deps=with_deps, recursive=recursive)
+    except (StageFileDoesNotExistError, StageFileBadNameError) as exc:
+        if not target:
+            raise
+        raise CheckoutErrorSuggestGit(target, exc)
 
     with self.state:
         _cleanup_unused_links(self, all_stages)

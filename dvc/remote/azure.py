@@ -3,18 +3,22 @@ from __future__ import unicode_literals
 
 import os
 import re
+import logging
 
 try:
     from azure.storage.blob import BlockBlobService
+    from azure.common import AzureMissingResourceHttpError
 except ImportError:
     BlockBlobService = None
 
-import dvc.logger as logger
 from dvc.utils import tmp_fname, move
 from dvc.utils.compat import urlparse, makedirs
 from dvc.progress import progress
 from dvc.config import Config
 from dvc.remote.base import RemoteBase
+
+
+logger = logging.getLogger(__name__)
 
 
 class Callback(object):
@@ -77,7 +81,12 @@ class RemoteAzure(RemoteBase):
                 connection_string=self.connection_string
             )
             logger.debug("Container name {}".format(self.bucket))
-            self.__blob_service.create_container(self.bucket)
+            try:  # verify that container exists
+                self.__blob_service.list_blobs(
+                    self.bucket, delimiter="/", num_results=1
+                )
+            except AzureMissingResourceHttpError:
+                self.__blob_service.create_container(self.bucket)
         return self.__blob_service
 
     def remove(self, path_info):
@@ -111,7 +120,7 @@ class RemoteAzure(RemoteBase):
     def list_cache_paths(self):
         return self._list_paths(self.bucket, self.prefix)
 
-    def upload(self, from_infos, to_infos, names=None):
+    def upload(self, from_infos, to_infos, names=None, no_progress_bar=False):
         names = self._verify_path_args(to_infos, from_infos, names)
 
         for from_info, to_info, name in zip(from_infos, to_infos, names):
@@ -133,7 +142,7 @@ class RemoteAzure(RemoteBase):
             if not name:
                 name = os.path.basename(from_info["path"])
 
-            cb = Callback(name)
+            cb = None if no_progress_bar else Callback(name)
 
             try:
                 self.blob_service.create_blob_from_path(

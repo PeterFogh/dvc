@@ -1,11 +1,19 @@
 from __future__ import unicode_literals
 
 import os
+import logging
 
 import dvc.prompt as prompt
-import dvc.logger as logger
 
-from dvc.exceptions import DvcException, NotDvcRepoError, OutputNotFoundError
+from dvc.exceptions import (
+    DvcException,
+    NotDvcRepoError,
+    OutputNotFoundError,
+    TargetNotDirectoryError,
+)
+from dvc.ignore import DvcIgnoreFileHandler
+
+logger = logging.getLogger(__name__)
 
 
 class Repo(object):
@@ -27,7 +35,7 @@ class Repo(object):
     from dvc.repo.status import status
     from dvc.repo.gc import gc
     from dvc.repo.commit import commit
-    from dvc.repo.pkg import install_pkg
+    from dvc.repo.diff import diff
     from dvc.repo.brancher import brancher
 
     def __init__(self, root_dir=None):
@@ -40,6 +48,8 @@ class Repo(object):
         from dvc.updater import Updater
         from dvc.repo.metrics import Metrics
         from dvc.scm.tree import WorkingTree
+        from dvc.repo.tag import Tag
+        from dvc.repo.pkg import Pkg
 
         root_dir = self.find_root(root_dir)
 
@@ -48,7 +58,7 @@ class Repo(object):
 
         self.config = Config(self.dvc_dir)
 
-        self.tree = WorkingTree()
+        self.tree = WorkingTree(self.root_dir)
 
         self.scm = SCM(self.root_dir, repo=self)
         self.lock = Lock(self.dvc_dir)
@@ -58,13 +68,19 @@ class Repo(object):
 
         core = self.config.config[Config.SECTION_CORE]
 
-        logger.set_level(core.get(Config.SECTION_CORE_LOGLEVEL))
+        logger.setLevel(
+            logging.getLevelName(
+                core.get(Config.SECTION_CORE_LOGLEVEL, "info").upper()
+            )
+        )
 
         self.cache = Cache(self)
         self.cloud = DataCloud(self, config=self.config.config)
         self.updater = Updater(self.dvc_dir)
 
         self.metrics = Metrics(self)
+        self.tag = Tag(self)
+        self.pkg = Pkg(self)
 
         self._ignore()
 
@@ -101,11 +117,9 @@ class Repo(object):
         init(root_dir=root_dir, no_scm=no_scm, force=force)
         return Repo(root_dir)
 
-    @staticmethod
-    def unprotect(target):
-        from dvc.repo.unprotect import unprotect
-
-        return unprotect(target)
+    def unprotect(self, target):
+        path_info = {"schema": "local", "path": target}
+        return self.cache.local.unprotect(path_info)
 
     def _ignore(self):
         flist = [
@@ -140,9 +154,12 @@ class Repo(object):
         assert len(pipelines) == 1
         return pipelines[0]
 
-    def collect(self, target, with_deps=False):
+    def collect(self, target, with_deps=False, recursive=False):
         import networkx as nx
         from dvc.stage import Stage
+
+        if not target or recursive:
+            return self.active_stages(target)
 
         stage = Stage.load(self, target)
         if not with_deps:
@@ -188,7 +205,7 @@ class Repo(object):
             else:
                 return ret
 
-        for i in self.cache.local.load_dir_cache(md5):
+        for i in out.dir_cache:
             i["branch"] = branch
             i[r.PARAM_PATH] = os.path.join(
                 info[r.PARAM_PATH], i[r.PARAM_RELPATH]
@@ -217,9 +234,7 @@ class Repo(object):
         if out.scheme != "local":
             return ret
 
-        md5 = info[out.remote.PARAM_CHECKSUM]
-        cache = self.cache.local.get(md5)
-        if not out.remote.is_dir_cache(cache):
+        if not out.is_dir_checksum:
             return ret
 
         return self._collect_dir_cache(
@@ -281,10 +296,52 @@ class Repo(object):
         return cache
 
     def graph(self, stages=None, from_directory=None):
+        """Generate a graph by using the given stages on the given directory
+
+        The nodes of the graph are the stage's path relative to the root.
+
+        Edges are created when the output of one stage is used as a
+        dependency in other stage.
+
+        The direction of the edges goes from the stage to its dependency:
+
+        For example, running the following:
+
+            $ dvc run -o A "echo A > A"
+            $ dvc run -d A -o B "echo B > B"
+            $ dvc run -d B -o C "echo C > C"
+
+        Will create the following graph:
+
+               ancestors <--
+                           |
+                C.dvc -> B.dvc -> A.dvc
+                |          |
+                |          --> descendants
+                |
+                ------- pipeline ------>
+                           |
+                           v
+              (weakly connected components)
+
+        Args:
+            stages (list): used to build a graph, if None given, use the ones
+                on the `from_directory`.
+
+            from_directory (str): directory where to look at for stages, if
+                None is given, use the current working directory
+
+        Raises:
+            OutputDuplicationError: two outputs with the same path
+            StagePathAsOutputError: stage inside an output directory
+            OverlappingOutputPathsError: output inside output directory
+            CyclicGraphError: resulting graph has cycles
+        """
         import networkx as nx
         from dvc.exceptions import (
             OutputDuplicationError,
             StagePathAsOutputError,
+            OverlappingOutputPathsError,
         )
 
         G = nx.DiGraph()
@@ -295,7 +352,15 @@ class Repo(object):
 
         for stage in stages:
             for out in stage.outs:
-                existing = [o.stage for o in outs if o.path == out.path]
+                existing = []
+                for o in outs:
+                    if o.path == out.path:
+                        existing.append(o.stage)
+
+                    in_o_dir = out.path.startswith(o.path + o.sep)
+                    in_out_dir = o.path.startswith(out.path + out.sep)
+                    if in_o_dir or in_out_dir:
+                        raise OverlappingOutputPathsError(o, out)
 
                 if existing:
                     stages = [stage.relpath, existing[0].relpath]
@@ -309,7 +374,6 @@ class Repo(object):
                 if path_dir.startswith(out.path + os.sep):
                     raise StagePathAsOutputError(stage.wdir, stage.relpath)
 
-        # collect the whole DAG
         for stage in stages:
             node = os.path.relpath(stage.path, self.root_dir)
 
@@ -360,10 +424,16 @@ class Repo(object):
 
         if not from_directory:
             from_directory = self.root_dir
+        elif not os.path.isdir(from_directory):
+            raise TargetNotDirectoryError(from_directory)
 
         stages = []
         outs = []
-        for root, dirs, files in self.tree.walk(from_directory):
+
+        ignore_file_handler = DvcIgnoreFileHandler(self.tree)
+        for root, dirs, files in self.tree.walk(
+            from_directory, ignore_file_handler=ignore_file_handler
+        ):
             for fname in files:
                 path = os.path.join(root, fname)
                 if not Stage.is_valid_filename(path):

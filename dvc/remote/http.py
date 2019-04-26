@@ -4,13 +4,16 @@ from dvc.utils.compat import open, makedirs
 import os
 import threading
 import requests
+import logging
 
-import dvc.logger as logger
 from dvc.progress import progress
 from dvc.exceptions import DvcException
 from dvc.config import Config
 from dvc.remote.base import RemoteBase
 from dvc.utils import move
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressBarCallback(object):
@@ -87,7 +90,7 @@ class RemoteHTTP(RemoteBase):
 
             except Exception:
                 msg = "failed to download '{}'".format(from_info["path"])
-                logger.error(msg)
+                logger.exception(msg)
                 continue
 
             if not no_progress_bar:
@@ -106,16 +109,11 @@ class RemoteHTTP(RemoteBase):
 
         return list(filter(func, md5s))
 
-    def save_info(self, path_info):
-        if path_info["scheme"] not in ["http", "https"]:
-            raise NotImplementedError
-
-        return {self.PARAM_CHECKSUM: self._etag(path_info["path"])}
-
     def _content_length(self, url):
         return self._request("HEAD", url).headers.get("Content-Length")
 
-    def _etag(self, url):
+    def get_file_checksum(self, path_info):
+        url = path_info["path"]
         etag = self._request("HEAD", url).headers.get("ETag") or self._request(
             "HEAD", url
         ).headers.get("Content-MD5")

@@ -1,35 +1,42 @@
 from __future__ import unicode_literals
 
-import dvc.logger as logger
+import argparse
+import logging
+
 from dvc.exceptions import DvcException
-from dvc.command.base import CmdBase, fix_subparsers
-from dvc.repo.pkg import PackageParams
+from dvc.command.base import CmdBase, fix_subparsers, append_doc_link
 
 
-class CmdPkg(CmdBase):
-    def run(self, unlock=False):
+logger = logging.getLogger(__name__)
+
+
+class CmdPkgInstall(CmdBase):
+    def run(self):
         try:
-            pkg_params = PackageParams(
+            self.repo.pkg.install(
                 self.args.address,
                 self.args.target_dir,
                 self.args.select,
                 self.args.file,
             )
-            return self.repo.install_pkg(pkg_params)
+            return 0
         except DvcException:
-            logger.error(
+            logger.exception(
                 "failed to install package '{}'".format(self.args.address)
             )
             return 1
-        pass
 
 
 def add_parser(subparsers, parent_parser):
     from dvc.command.config import parent_config_parser
 
-    PKG_HELP = "Manage packages and modules"
+    PKG_HELP = "Manage DVC packages."
     pkg_parser = subparsers.add_parser(
-        "pkg", parents=[parent_parser], description=PKG_HELP, add_help=False
+        "pkg",
+        parents=[parent_parser],
+        description=append_doc_link(PKG_HELP, "pkg"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
     )
 
     pkg_subparsers = pkg_parser.add_subparsers(
@@ -42,8 +49,9 @@ def add_parser(subparsers, parent_parser):
     pkg_install_parser = pkg_subparsers.add_parser(
         "install",
         parents=[parent_config_parser, parent_parser],
-        description=PKG_INSTALL_HELP,
+        description=append_doc_link(PKG_INSTALL_HELP, "pkg-install"),
         help=PKG_INSTALL_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     pkg_install_parser.add_argument(
         "address",
@@ -78,4 +86,4 @@ def add_parser(subparsers, parent_parser):
         "By default the file has 'mod_' prefix and imported package name "
         "followed by .dvc",
     )
-    pkg_install_parser.set_defaults(func=CmdPkg)
+    pkg_install_parser.set_defaults(func=CmdPkgInstall)

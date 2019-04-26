@@ -1,19 +1,22 @@
 from __future__ import unicode_literals
 
 import os
+import logging
 
 try:
     from google.cloud import storage
 except ImportError:
     storage = None
 
-import dvc.logger as logger
 from dvc.utils import tmp_fname, move
 from dvc.utils.compat import urlparse, makedirs
 from dvc.remote.base import RemoteBase
 from dvc.config import Config
 from dvc.progress import progress
 from dvc.exceptions import DvcException
+
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteGS(RemoteBase):
@@ -52,10 +55,12 @@ class RemoteGS(RemoteBase):
             else storage.Client(self.projectname)
         )
 
-    def get_md5(self, bucket, path):
+    def get_file_checksum(self, path_info):
         import base64
         import codecs
 
+        bucket = path_info["bucket"]
+        path = path_info["path"]
         blob = self.gs.bucket(bucket).get_blob(path)
         if not blob:
             return None
@@ -63,16 +68,6 @@ class RemoteGS(RemoteBase):
         b64_md5 = blob.md5_hash
         md5 = base64.b64decode(b64_md5)
         return codecs.getencoder("hex")(md5)[0].decode("utf-8")
-
-    def save_info(self, path_info):
-        if path_info["scheme"] != "gs":
-            raise NotImplementedError
-
-        return {
-            self.PARAM_CHECKSUM: self.get_md5(
-                path_info["bucket"], path_info["path"]
-            )
-        }
 
     def copy(self, from_info, to_info, gs=None):
         gs = gs if gs else self.gs
@@ -117,7 +112,7 @@ class RemoteGS(RemoteBase):
         paths = self._list_paths(path_info["bucket"], path_info["path"])
         return any(path_info["path"] == path for path in paths)
 
-    def upload(self, from_infos, to_infos, names=None):
+    def upload(self, from_infos, to_infos, names=None, no_progress_bar=False):
         names = self._verify_path_args(to_infos, from_infos, names)
 
         gs = self.gs
@@ -138,7 +133,8 @@ class RemoteGS(RemoteBase):
             if not name:
                 name = os.path.basename(from_info["path"])
 
-            progress.update_target(name, 0, None)
+            if not no_progress_bar:
+                progress.update_target(name, 0, None)
 
             try:
                 bucket = gs.bucket(to_info["bucket"])
@@ -146,7 +142,7 @@ class RemoteGS(RemoteBase):
                 blob.upload_from_filename(from_info["path"])
             except Exception:
                 msg = "failed to upload '{}' to '{}/{}'"
-                logger.error(
+                logger.exception(
                     msg.format(
                         from_info["path"], to_info["bucket"], to_info["path"]
                     )
@@ -200,7 +196,7 @@ class RemoteGS(RemoteBase):
                 blob.download_to_filename(tmp_file)
             except Exception:
                 msg = "failed to download '{}/{}' to '{}'"
-                logger.error(
+                logger.exception(
                     msg.format(
                         from_info["bucket"], from_info["path"], to_info["path"]
                     )
