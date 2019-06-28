@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 import logging
 
 from dvc.cli import parse_args
+from dvc.config import ConfigError
 from dvc.analytics import Analytics
 from dvc.exceptions import NotDvcRepoError, DvcParserError
 
@@ -24,6 +25,7 @@ def main(argv=None):
     args = None
     cmd = None
 
+    outerLogLevel = logger.level
     try:
         args = parse_args(argv)
 
@@ -32,9 +34,13 @@ def main(argv=None):
 
         elif args.verbose:
             logger.setLevel(logging.DEBUG)
+            logging.getLogger("paramiko").setLevel(logging.DEBUG)
 
         cmd = args.func(args)
         ret = cmd.run_cmd()
+    except ConfigError:
+        logger.exception("configuration error")
+        ret = 251
     except KeyboardInterrupt:
         logger.exception("interrupted by the user")
         ret = 252
@@ -46,6 +52,8 @@ def main(argv=None):
     except Exception:  # pylint: disable=broad-except
         logger.exception("unexpected error")
         ret = 255
+    finally:
+        logger.setLevel(outerLogLevel)
 
     Analytics().send_cmd(cmd, args, ret)
 

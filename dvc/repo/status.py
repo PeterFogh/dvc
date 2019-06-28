@@ -14,7 +14,7 @@ def _local_status(self, target=None, with_deps=False):
     for stage in stages:
         if stage.locked:
             logger.warning(
-                "DVC file '{path}' is locked. Its dependencies are"
+                "DVC-file '{path}' is locked. Its dependencies are"
                 " not going to be shown in the status output.".format(
                     path=stage.relpath
                 )
@@ -35,6 +35,32 @@ def _cloud_status(
     with_deps=False,
     all_tags=False,
 ):
+    """Returns a dictionary with the files that are new or deleted.
+
+    - new: Remote doesn't have the file
+    - deleted: File is no longer in the local cache
+
+    Example:
+            Given the following commands:
+
+            $ echo "foo" > foo
+            $ echo "bar" > bar
+            $ dvc add foo bar
+            $ dvc status -c
+
+            It will return something like:
+
+            { "foo": "new", "bar": "new" }
+
+            Now, after pushing and removing "bar" from the local cache:
+
+            $ dvc push
+            $ rm .dvc/cache/c1/57a79031e1c40f85931829bc5fc552
+
+            The result would be:
+
+            { "bar": "deleted" }
+    """
     import dvc.remote.base as cloud
 
     used = self.used_cache(

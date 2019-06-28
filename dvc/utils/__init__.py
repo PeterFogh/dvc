@@ -3,6 +3,7 @@
 from __future__ import unicode_literals
 
 from dvc.utils.compat import str, builtin_str, open, cast_bytes_py2, StringIO
+from dvc.utils.compat import fspath
 
 import os
 import sys
@@ -45,8 +46,8 @@ def file_md5(fname):
         if size >= LARGE_FILE_SIZE:
             bar = True
             msg = "Computing md5 for a large file {}. This is only done once."
-            logger.info(msg.format(os.path.relpath(fname)))
-            name = os.path.relpath(fname)
+            logger.info(msg.format(relpath(fname)))
+            name = relpath(fname)
             total = 0
 
         with open(fname, "rb") as fobj:
@@ -113,7 +114,9 @@ def dict_md5(d, exclude=[]):
 
 def copyfile(src, dest, no_progress_bar=False, name=None):
     """Copy file with progress bar"""
+    from dvc.exceptions import DvcException
     from dvc.progress import progress
+    from dvc.system import System
 
     copied = 0
     name = name if name else os.path.basename(dest)
@@ -122,15 +125,18 @@ def copyfile(src, dest, no_progress_bar=False, name=None):
     if os.path.isdir(dest):
         dest = os.path.join(dest, os.path.basename(src))
 
-    with open(src, "rb") as fsrc, open(dest, "wb+") as fdest:
-        while True:
-            buf = fsrc.read(LOCAL_CHUNK_SIZE)
-            if not buf:
-                break
-            fdest.write(buf)
-            copied += len(buf)
-            if not no_progress_bar:
-                progress.update_target(name, copied, total)
+    try:
+        System.reflink(src, dest)
+    except DvcException:
+        with open(src, "rb") as fsrc, open(dest, "wb+") as fdest:
+            while True:
+                buf = fsrc.read(LOCAL_CHUNK_SIZE)
+                if not buf:
+                    break
+                fdest.write(buf)
+                copied += len(buf)
+                if not no_progress_bar:
+                    progress.update_target(name, copied, total)
 
     if not no_progress_bar:
         progress.finish_target(name)
@@ -151,12 +157,13 @@ def move(src, dst):
 
 
 def _chmod(func, p, excinfo):
+    perm = os.lstat(p).st_mode
+    perm |= stat.S_IWRITE
+
     try:
-        perm = os.stat(p).st_mode
-        perm |= stat.S_IWRITE
         os.chmod(p, perm)
     except OSError as exc:
-        # NOTE: broken symlink case.
+        # broken symlink
         if exc.errno != errno.ENOENT:
             raise
 
@@ -164,7 +171,7 @@ def _chmod(func, p, excinfo):
 
 
 def remove(path):
-    logger.debug("Removing '{}'".format(os.path.relpath(path)))
+    logger.debug("Removing '{}'".format(relpath(path)))
 
     try:
         if os.path.isdir(path):
@@ -176,16 +183,33 @@ def remove(path):
             raise
 
 
-def to_chunks(l, jobs):
-    n = int(math.ceil(len(l) / jobs))
+def _split(list_to_split, chunk_size):
+    return [
+        list_to_split[i : i + chunk_size]
+        for i in range(0, len(list_to_split), chunk_size)
+    ]
 
-    if len(l) == 1:
-        return [l]
 
-    if n == 0:
-        n = 1
+def _to_chunks_by_chunks_number(list_to_split, num_chunks):
+    chunk_size = int(math.ceil(float(len(list_to_split)) / num_chunks))
 
-    return [l[x : x + n] for x in range(0, len(l), n)]
+    if len(list_to_split) == 1:
+        return [list_to_split]
+
+    if chunk_size == 0:
+        chunk_size = 1
+
+    return _split(list_to_split, chunk_size)
+
+
+def to_chunks(list_to_split, num_chunks=None, chunk_size=None):
+    if (num_chunks and chunk_size) or (not num_chunks and not chunk_size):
+        raise ValueError(
+            "One and only one of 'num_chunks', 'chunk_size' must be defined"
+        )
+    if chunk_size:
+        return _split(list_to_split, chunk_size)
+    return _to_chunks_by_chunks_number(list_to_split, num_chunks)
 
 
 # NOTE: Check if we are in a bundle
@@ -227,9 +251,9 @@ def convert_to_unicode(data):
 
 def tmp_fname(fname):
     """ Temporary name for a partial download """
-    from uuid import uuid4
+    from shortuuid import uuid
 
-    return fname + "." + str(uuid4()) + ".tmp"
+    return fspath(fname) + "." + str(uuid()) + ".tmp"
 
 
 def current_timestamp():
@@ -279,7 +303,7 @@ def dvc_walk(
 
 def walk_files(directory, ignore_file_handler=None):
     for root, _, files in dvc_walk(
-        str(directory), ignore_file_handler=ignore_file_handler
+        directory, ignore_file_handler=ignore_file_handler
     ):
         for f in files:
             yield os.path.join(root, f)
@@ -363,3 +387,15 @@ def _visual_center(line, width):
     right_padding = spaces - left_padding
 
     return (left_padding * " ") + line + (right_padding * " ")
+
+
+def relpath(path, start=os.curdir):
+    path = fspath(path)
+    start = os.path.abspath(fspath(start))
+
+    # Windows path on different drive than curdir doesn't have relpath
+    if os.name == "nt" and not os.path.commonprefix(
+        [start, os.path.abspath(path)]
+    ):
+        return path
+    return os.path.relpath(path, start)

@@ -1,8 +1,3 @@
-branches:
-  only:
-    - master
-    - devel
-
 cache:
   - C:\ProgramData\chocolatey\bin -> appveyor.yml
   - C:\ProgramData\chocolatey\lib -> appveyor.yml
@@ -20,40 +15,54 @@ environment:
     secure: XN4jRtmGE5Bqg8pPZkwNs7kn3UEI73Rkldqc0MGsQISZBm5TNJZOPofDMc1QnUsf
   AZURE_STORAGE_CONTAINER_NAME: appveyor-tests
   AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
+  OSS_ENDPOINT: localhost:50004
+  OSS_ACCESS_KEY_ID: AccessKeyID
+  OSS_ACCESS_KEY_SECRET: AccessKeySecret
 
   matrix:
 
     - PYTHON: "C:\\Python27"
-      PYTHON_VERSION: "2.7.x" # currently 2.7.9
+      PYTHON_VERSION: "2.7.x"
       PYTHON_ARCH: "32"
+      RUBY: C:\Ruby25\bin
 
-# Disabled as unnecessary
-#    - PYTHON: "C:\\Python27-x64"
-#      PYTHON_VERSION: "2.7.x" # currently 2.7.9
-#      PYTHON_ARCH: "64"
+    - PYTHON: "C:\\Python37"
+      PYTHON_VERSION: "3.7.x"
+      PYTHON_ARCH: "32"
+      RUBY: C:\Ruby25\bin
 
 install:
-  - ps: Install-Product node
-  - npm install -g azurite
-  - ps: $AzuriteProcess = Start-Process azurite-blob -PassThru
-  - cinst wget
   - cinst awscli
+  - cinst wget
   - cinst gcloudsdk
-  - refreshenv
   - cinst gsutil
   - cinst openssl.light --version 1.1.1
+  - refreshenv
+  - "SET PATH=%PYTHON%;%PYTHON%\\Scripts;%RUBY%;%PATH%"
+  - git clone -q https://github.com/iterative/oss-emulator.git
+  - gem install thor builder
+  - ps: cd oss-emulator
+  - ps: $OSSProcess = Start-Process -FilePath ruby -ArgumentList "bin\emulator -r store -p 50004" -PassThru -NoNewWindow
+  - ps: cd ..
+  # NOTE: azurite 3 on py3 suffers from bug [1], so we are using an older
+  # tried-and-true version instead.
+  #
+  # [1] https://github.com/Azure/Azurite/issues/215
+  - npm install -g azurite@2.7.0
+  - ps: $AzuriteProcess = Start-Process azurite-blob -PassThru
   - python -m pip install -U pip setuptools wheel
-  - pip install -r requirements.txt
-  - python setup.py install
+  - pip install .[all,tests]
+  - where dvc
+  - dvc --version
 
 build: false
 
 before_test:
+  - pip uninstall -y awscli # Using awscli from chocolatey
   - aws configure set aws_access_key_id "%aws_access_key_id%"
   - aws configure set aws_secret_access_key "%aws_secret_access_key%"
   - aws configure set region us-east-2
   - openssl enc -d -aes-256-cbc -md md5 -k "%GCP_CREDS%" -in scripts\ci\gcp-creds.json.enc -out scripts\ci\gcp-creds.json & exit 0
-  - pip install -r tests/requirements.txt
 
 test_script:
   - python -mtests
@@ -66,6 +75,7 @@ after_test:
 
 on_finish:
   - ps: Stop-Process $AzuriteProcess
+  - ps: Stop-Process $OSSProcess
 
 artifacts:
   - path: dvc*.exe
@@ -76,4 +86,6 @@ deploy:
   auth_token:
     secure: 25c1pNoXWbtTwUkKLcThwcl2A2xG8oXHsPuD73HVbQ7SRy9X6HzkCc2sXzhpfRtF
   on:
-    appveyor_repo_tag: true
+    APPVEYOR_REPO_TAG: true
+    PYTHON_VERSION: "3.7.x"
+    PYTHON_ARCH: "32"

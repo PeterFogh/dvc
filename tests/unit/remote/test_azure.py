@@ -1,9 +1,9 @@
 from unittest import TestCase
 
-from dvc.remote.azure import RemoteAzure
+from dvc.remote.azure import RemoteAZURE
 
 
-class TestRemoteAzure(TestCase):
+class TestRemoteAZURE(TestCase):
     container_name = "container-name"
     connection_string = (
         "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
@@ -20,18 +20,14 @@ class TestRemoteAzure(TestCase):
             connection_string=self.connection_string,
         )
         config = {"url": url}
-        remote = RemoteAzure(None, config)
-        self.assertEqual(remote.url, url)
-        self.assertEqual(remote.prefix, "")
-        self.assertEqual(remote.bucket, self.container_name)
+        remote = RemoteAZURE(None, config)
+        self.assertEqual(remote.path_info, "azure://" + self.container_name)
         self.assertEqual(remote.connection_string, self.connection_string)
 
     def test_init(self):
         prefix = "some/prefix"
         url = "azure://{}/{}".format(self.container_name, prefix)
         config = {"url": url, "connection_string": self.connection_string}
-        remote = RemoteAzure(None, config)
-        self.assertEqual(remote.url, url)
-        self.assertEqual(remote.prefix, prefix)
-        self.assertEqual(remote.bucket, self.container_name)
+        remote = RemoteAZURE(None, config)
+        self.assertEqual(remote.path_info, url)
         self.assertEqual(remote.connection_string, self.connection_string)

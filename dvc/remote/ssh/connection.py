@@ -1,8 +1,9 @@
-import errno
 import os
 import posixpath
 import logging
-from stat import S_ISDIR
+import errno
+import stat
+from contextlib import contextmanager
 
 try:
     import paramiko
@@ -10,7 +11,7 @@ except ImportError:
     paramiko = None
 
 from dvc.utils import tmp_fname
-from dvc.utils.compat import makedirs
+from dvc.utils.compat import ignore_file_not_found
 from dvc.progress import progress
 from dvc.exceptions import DvcException
 from dvc.remote.base import RemoteCmdError
@@ -73,48 +74,36 @@ class SSHConnection:
 
         self._ssh.close()
 
-    def exists(self, path):
+    def st_mode(self, path):
         self._sftp_connect()
-        try:
-            return self._sftp.stat(path)
-        except IOError:
-            return False
-        pass
+
+        with ignore_file_not_found():
+            return self._sftp.stat(path).st_mode
+
+        return 0
+
+    def exists(self, path, sftp=None):
+        return bool(self.st_mode(path))
 
     def isdir(self, path):
-        from stat import S_ISDIR
-
-        self._sftp_connect()
-        try:
-            return S_ISDIR(self._sftp.stat(path).st_mode)
-        except IOError:
-            return False
+        return stat.S_ISDIR(self.st_mode(path))
 
     def isfile(self, path):
-        from stat import S_ISREG
-
-        self._sftp_connect()
-        try:
-            return S_ISREG(self._sftp.stat(path).st_mode)
-        except IOError:
-            return False
+        return stat.S_ISREG(self.st_mode(path))
 
     def islink(self, path):
-        from stat import S_ISLNK
-
-        self._sftp_connect()
-        try:
-            return S_ISLNK(self._sftp.stat(path).st_mode)
-        except IOError:
-            return False
+        return stat.S_ISLNK(self.st_mode(path))
 
     def makedirs(self, path):
         self._sftp_connect()
 
-        if self.isdir(path):
+        # Single stat call will say whether this is a dir, a file or a link
+        st_mode = self.st_mode(path)
+
+        if stat.S_ISDIR(st_mode):
             return
 
-        if self.isfile(path) or self.islink(path):
+        if stat.S_ISREG(st_mode) or stat.S_ISLNK(st_mode):
             raise DvcException(
                 "a file with the same name '{}' already exists".format(path)
             )
@@ -125,7 +114,13 @@ class SSHConnection:
             self.makedirs(head)
 
         if tail:
-            self._sftp.mkdir(path)
+            try:
+                self._sftp.mkdir(path)
+            except IOError as e:
+                # Since paramiko errors are very vague we need to recheck
+                # whether it's because path already exists or something else
+                if e.errno == errno.EACCES or not self.exists(path):
+                    raise
 
     def walk(self, directory, topdown=True):
         # NOTE: original os.walk() implementation [1] with default options was
@@ -149,7 +144,7 @@ class SSHConnection:
         nondirs = []
         for entry in dir_entries:
             name = entry.filename
-            if S_ISDIR(entry.st_mode):
+            if stat.S_ISDIR(entry.st_mode):
                 dirs.append(name)
             else:
                 nondirs.append(name)
@@ -171,11 +166,8 @@ class SSHConnection:
                 yield posixpath.join(root, fname)
 
     def _remove_file(self, path):
-        try:
+        with ignore_file_not_found():
             self._sftp.remove(path)
-        except IOError as exc:
-            if exc.errno != errno.ENOENT:
-                raise
 
     def _remove_dir(self, path):
         for root, dirs, files in self.walk(path, topdown=False):
@@ -186,11 +178,9 @@ class SSHConnection:
             for dname in dirs:
                 path = posixpath.join(root, dname)
                 self._sftp.rmdir(dname)
-        try:
+
+        with ignore_file_not_found():
             self._sftp.rmdir(path)
-        except IOError as exc:
-            if exc.errno != errno.ENOENT:
-                raise
 
     def remove(self, path):
         self._sftp_connect()
@@ -203,22 +193,14 @@ class SSHConnection:
     def download(self, src, dest, no_progress_bar=False, progress_title=None):
         self._sftp_connect()
 
-        makedirs(os.path.dirname(dest), exist_ok=True)
-        tmp_file = tmp_fname(dest)
-
         if no_progress_bar:
-            self._sftp.get(src, tmp_file)
+            self._sftp.get(src, dest)
         else:
             if not progress_title:
-                progress_title = os.path.basename(dest)
+                progress_title = os.path.basename(src)
 
-            self._sftp.get(src, tmp_file, callback=create_cb(progress_title))
+            self._sftp.get(src, dest, callback=create_cb(progress_title))
             progress.finish_target(progress_title)
-
-        if os.path.exists(dest):
-            os.remove(dest)
-
-        os.rename(tmp_file, dest)
 
     def move(self, src, dst):
         self.makedirs(posixpath.dirname(dst))
@@ -320,3 +302,19 @@ class SSHConnection:
     def cp(self, src, dest):
         self.makedirs(posixpath.dirname(dest))
         self.execute("cp {} {}".format(src, dest))
+
+    @contextmanager
+    def open_max_sftp_channels(self):
+        try:
+            channels = []
+            while True:
+                try:
+                    channels.append(self._ssh.open_sftp())
+                except paramiko.ssh_exception.ChannelException:
+                    if not channels:
+                        raise
+                    break
+            yield channels
+        finally:
+            for channel in channels:
+                channel.close()

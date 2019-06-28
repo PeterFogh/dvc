@@ -1,9 +1,9 @@
 from __future__ import unicode_literals
 
+from dvc.utils import relpath
 from dvc.utils.compat import str
 
 import argparse
-import os
 import logging
 
 from dvc.exceptions import DvcException
@@ -21,7 +21,7 @@ class CmdPipelineShow(CmdBase):
         stage = Stage.load(self.repo, target)
         G = self.repo.graph()[0]
         stages = networkx.get_node_attributes(G, "stage")
-        node = os.path.relpath(stage.path, self.repo.root_dir)
+        node = relpath(stage.path, self.repo.root_dir)
         nodes = networkx.dfs_postorder_nodes(G, node)
 
         if locked:
@@ -29,6 +29,8 @@ class CmdPipelineShow(CmdBase):
 
         for n in nodes:
             if commands:
+                if stages[n].cmd is None:
+                    continue
                 logger.info(stages[n].cmd)
             elif outs:
                 for out in stages[n].outs:
@@ -41,7 +43,7 @@ class CmdPipelineShow(CmdBase):
         from dvc.stage import Stage
 
         stage = Stage.load(self.repo, target)
-        node = os.path.relpath(stage.path, self.repo.root_dir)
+        node = relpath(stage.path, self.repo.root_dir)
 
         pipelines = list(
             filter(lambda g: node in g.nodes(), self.repo.pipelines())
@@ -115,7 +117,8 @@ class CmdPipelineShow(CmdBase):
             observe_list.pop(0)
         tree.show()
 
-    def __write_dot(self, target, commands, outs, filename):
+    def __write_dot(self, target, commands, outs):
+        from dvc.utils.compat import StringIO
         import networkx
         from networkx.drawing.nx_pydot import write_dot
 
@@ -124,7 +127,10 @@ class CmdPipelineShow(CmdBase):
 
         simple_g = networkx.DiGraph()
         simple_g.add_edges_from(edges)
-        write_dot(simple_g, filename)
+
+        dot_file = StringIO()
+        write_dot(simple_g, dot_file)
+        logger.info(dot_file.getvalue())
 
     def run(self):
         if not self.args.targets:
@@ -138,10 +144,7 @@ class CmdPipelineShow(CmdBase):
                     )
                 elif self.args.dot:
                     self.__write_dot(
-                        target,
-                        self.args.commands,
-                        self.args.outs,
-                        self.args.dot,
+                        target, self.args.commands, self.args.outs
                     )
                 elif self.args.tree:
                     self._show_dependencies_tree(
@@ -194,7 +197,7 @@ def add_parser(subparsers, parent_parser):
 
     fix_subparsers(pipeline_subparsers)
 
-    PIPELINE_SHOW_HELP = "Show pipeline."
+    PIPELINE_SHOW_HELP = "Show pipelines."
     pipeline_show_parser = pipeline_subparsers.add_parser(
         "show",
         parents=[parent_parser],
@@ -208,14 +211,14 @@ def add_parser(subparsers, parent_parser):
         "--commands",
         action="store_true",
         default=False,
-        help="Print commands instead of paths to DVC files.",
+        help="Print commands instead of paths to DVC-files.",
     )
     pipeline_show_group.add_argument(
         "-o",
         "--outs",
         action="store_true",
         default=False,
-        help="Print output files instead of paths to DVC files.",
+        help="Print output files instead of paths to DVC-files.",
     )
     pipeline_show_parser.add_argument(
         "-l",
@@ -231,7 +234,10 @@ def add_parser(subparsers, parent_parser):
         help="Output DAG as ASCII.",
     )
     pipeline_show_parser.add_argument(
-        "--dot", help="Write DAG in .dot format."
+        "--dot",
+        action="store_true",
+        default=False,
+        help="Print DAG with .dot format.",
     )
     pipeline_show_parser.add_argument(
         "--tree",
@@ -240,7 +246,10 @@ def add_parser(subparsers, parent_parser):
         help="Output DAG as Dependencies Tree.",
     )
     pipeline_show_parser.add_argument(
-        "targets", nargs="*", help="DVC files. 'Dvcfile' by default."
+        "targets",
+        nargs="*",
+        help="DVC-files to show pipeline for. Optional. "
+        "(Finds all DVC-files in the workspace by default.)",
     )
     pipeline_show_parser.set_defaults(func=CmdPipelineShow)
 

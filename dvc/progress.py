@@ -111,7 +111,7 @@ class Progress(object):
 
         logger = logging.getLogger(__name__)
 
-        if logger.getEffectiveLevel() == "CRITICAL":
+        if logger.getEffectiveLevel() == logging.CRITICAL:
             return
 
         print(*args, **kwargs)
@@ -125,6 +125,16 @@ class Progress(object):
         if self._line is not None:
             self.refresh()
         self._lock.release()
+
+    def __call__(self, seq, name="", total=None):
+        if total is None:
+            total = len(seq)
+
+        self.update_target(name, 0, total)
+        for done, item in enumerate(seq, start=1):
+            yield item
+            self.update_target(name, done, total)
+        self.finish_target(name)
 
 
 class ProgressCallback(object):

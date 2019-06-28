@@ -2,24 +2,29 @@ from __future__ import unicode_literals
 
 import os
 
+import pytest
+
 import dvc
 import time
 import shutil
 import filecmp
 import posixpath
+import logging
+import colorama
 
 from dvc.system import System
 from mock import patch
 
 from dvc.main import main
-from dvc.utils import file_md5
+from dvc.utils import file_md5, LARGE_DIR_SIZE, relpath
 from dvc.utils.stage import load_stage_file
+from dvc.utils.compat import range
 from dvc.stage import Stage
 from dvc.exceptions import DvcException, RecursiveAddingWhileUsingFilename
 from dvc.output.base import OutputAlreadyTrackedError
 from dvc.repo import Repo as DvcRepo
 
-from tests.basic_env import TestDvc
+from tests.basic_env import TestDvc, TestDvcGit
 from tests.utils import spy, get_gitignore_content
 
 
@@ -87,6 +92,30 @@ class TestAddCmdDirectoryRecursive(TestDvc):
         ret = main(["add", "--recursive", self.DATA_DIR])
         self.assertEqual(ret, 0)
 
+    def test_warn_about_large_directories(self):
+        warning = (
+            "You are adding a large directory 'large-dir' recursively,"
+            " consider tracking it as a whole instead.\n"
+            "{purple}HINT:{nc} Remove the generated DVC-file and then"
+            " run {cyan}dvc add large-dir{nc}".format(
+                purple=colorama.Fore.MAGENTA,
+                cyan=colorama.Fore.CYAN,
+                nc=colorama.Style.RESET_ALL,
+            )
+        )
+
+        os.mkdir("large-dir")
+
+        # Create a lot of files
+        for iteration in range(LARGE_DIR_SIZE + 1):
+            path = os.path.join("large-dir", str(iteration))
+            with open(path, "w") as fobj:
+                fobj.write(path)
+
+        with self._caplog.at_level(logging.WARNING, logger="dvc"):
+            assert main(["add", "--recursive", "large-dir"]) == 0
+            assert warning in self._caplog.messages
+
 
 class TestAddDirectoryWithForwardSlash(TestDvc):
     def test(self):
@@ -100,7 +129,7 @@ class TestAddDirectoryWithForwardSlash(TestDvc):
         self.assertEqual(os.path.abspath("directory.dvc"), stage.path)
 
 
-class TestAddTrackedFile(TestDvc):
+class TestAddTrackedFile(TestDvcGit):
     def test(self):
         fname = "tracked_file"
         self.create(fname, "tracked file contents")
@@ -237,7 +266,16 @@ class TestShouldUpdateStateEntryForFileAfterAdd(TestDvc):
             self.assertEqual(ret, 0)
             self.assertEqual(file_md5_counter.mock.call_count, 1)
 
-            ret = main(["run", "-d", self.FOO, "cat {}".format(self.FOO)])
+            ret = main(["run", "-d", self.FOO, "echo foo"])
+            self.assertEqual(ret, 0)
+            self.assertEqual(file_md5_counter.mock.call_count, 1)
+
+            os.rename(self.FOO, self.FOO + ".back")
+            ret = main(["checkout"])
+            self.assertEqual(ret, 0)
+            self.assertEqual(file_md5_counter.mock.call_count, 1)
+
+            ret = main(["status"])
             self.assertEqual(ret, 0)
             self.assertEqual(file_md5_counter.mock.call_count, 1)
 
@@ -258,9 +296,19 @@ class TestShouldUpdateStateEntryForDirectoryAfterAdd(TestDvc):
             self.assertEqual(ret, 0)
             self.assertEqual(file_md5_counter.mock.call_count, 3)
 
+            ls = "dir" if os.name == "nt" else "ls"
             ret = main(
-                ["run", "-d", self.DATA_DIR, "ls {}".format(self.DATA_DIR)]
+                ["run", "-d", self.DATA_DIR, "{} {}".format(ls, self.DATA_DIR)]
             )
+            self.assertEqual(ret, 0)
+            self.assertEqual(file_md5_counter.mock.call_count, 3)
+
+            os.rename(self.DATA_DIR, self.DATA_DIR + ".back")
+            ret = main(["checkout"])
+            self.assertEqual(ret, 0)
+            self.assertEqual(file_md5_counter.mock.call_count, 3)
+
+            ret = main(["status"])
             self.assertEqual(ret, 0)
             self.assertEqual(file_md5_counter.mock.call_count, 3)
 
@@ -276,29 +324,6 @@ class TestAddCommit(TestDvc):
         self.assertEqual(ret, 0)
         self.assertTrue(os.path.isfile(self.FOO))
         self.assertEqual(len(os.listdir(self.dvc.cache.local.cache_dir)), 1)
-
-
-class TestShouldNotCheckCacheForDirIfCacheMetadataDidNotChange(TestDvc):
-    def test(self):
-        remote_local_loader_spy = spy(
-            dvc.remote.local.RemoteLOCAL.load_dir_cache
-        )
-        with patch.object(
-            dvc.remote.local.RemoteLOCAL,
-            "load_dir_cache",
-            remote_local_loader_spy,
-        ):
-
-            ret = main(["config", "cache.type", "copy"])
-            self.assertEqual(ret, 0)
-
-            ret = main(["add", self.DATA_DIR])
-            self.assertEqual(ret, 0)
-            self.assertEqual(1, remote_local_loader_spy.mock.call_count)
-
-            ret = main(["status", "{}.dvc".format(self.DATA_DIR)])
-            self.assertEqual(ret, 0)
-            self.assertEqual(1, remote_local_loader_spy.mock.call_count)
 
 
 class TestShouldCollectDirCacheOnlyOnce(TestDvc):
@@ -397,7 +422,7 @@ class TestShouldThrowProperExceptionOnCorruptedStageFile(TestDvc):
         ret = main(["add", self.FOO])
         assert 0 == ret
 
-        foo_stage = os.path.relpath(self.FOO + Stage.STAGE_FILE_SUFFIX)
+        foo_stage = relpath(self.FOO + Stage.STAGE_FILE_SUFFIX)
 
         # corrupt stage file
         with open(foo_stage, "a+") as file:
@@ -409,7 +434,7 @@ class TestShouldThrowProperExceptionOnCorruptedStageFile(TestDvc):
         assert 1 == ret
 
         expected_error = (
-            "unable to read stage file: {} "
+            "unable to read DVC-file: {} "
             "YAML file structure is corrupted".format(foo_stage)
         )
 
@@ -444,12 +469,13 @@ class TestAddFilename(TestDvc):
         self.assertFalse(os.path.exists("foo.dvc"))
 
 
-class TestShouldCleanUpAfterFailedAdd(TestDvc):
+class TestShouldCleanUpAfterFailedAdd(TestDvcGit):
     def test(self):
         ret = main(["add", self.FOO])
         self.assertEqual(0, ret)
 
         foo_stage_file = self.FOO + Stage.STAGE_FILE_SUFFIX
+
         # corrupt stage file
         with open(foo_stage_file, "a+") as file:
             file.write("this will break yaml file structure")
@@ -496,3 +522,14 @@ class TestAddUnprotected(TestDvc):
 
         self.assertFalse(os.access(self.FOO, os.W_OK))
         self.assertTrue(System.is_hardlink(self.FOO))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows specific")
+def test_windows_should_add_when_cache_on_different_drive(
+    dvc_repo, repo_dir, temporary_windows_drive
+):
+    ret = main(["config", "cache.dir", temporary_windows_drive])
+    assert ret == 0
+
+    ret = main(["add", repo_dir.DATA])
+    assert ret == 0

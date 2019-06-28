@@ -1,6 +1,6 @@
 from __future__ import unicode_literals
 
-from dvc.utils.compat import str, open
+from dvc.utils.compat import str, open, fspath
 
 import os
 import errno
@@ -15,6 +15,8 @@ class System(object):
     def hardlink(source, link_name):
         import ctypes
         from dvc.exceptions import DvcException
+
+        source, link_name = fspath(source), fspath(link_name)
 
         if System.is_unix():
             try:
@@ -39,6 +41,8 @@ class System(object):
     def symlink(source, link_name):
         import ctypes
         from dvc.exceptions import DvcException
+
+        source, link_name = fspath(source), fspath(link_name)
 
         if System.is_unix():
             try:
@@ -117,6 +121,8 @@ class System(object):
         import platform
         from dvc.exceptions import DvcException
 
+        source, link_name = fspath(source), fspath(link_name)
+
         system = platform.system()
         try:
             if system == "Windows":
@@ -134,19 +140,20 @@ class System(object):
             raise DvcException("reflink is not supported")
 
     @staticmethod
-    def getdirinfo(path):
+    def _getdirinfo(path):
         import ctypes
         from ctypes import c_void_p, c_wchar_p, Structure, WinError, POINTER
         from ctypes.wintypes import DWORD, HANDLE, BOOL
+        from win32file import (
+            FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_READ,
+            OPEN_EXISTING,
+        )
 
-        # NOTE: use this flag to open symlink itself and not the target
-        # See https://docs.microsoft.com/en-us/windows/desktop/api/
+        # NOTE: use FILE_FLAG_OPEN_REPARSE_POINT to open symlink itself and not
+        # the target See https://docs.microsoft.com/en-us/windows/desktop/api/
         # fileapi/nf-fileapi-createfilew#symbolic-link-behavior
-        FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-
-        FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-        FILE_SHARE_READ = 0x00000001
-        OPEN_EXISTING = 3
 
         class FILETIME(Structure):
             _fields_ = [("dwLowDateTime", DWORD), ("dwHighDateTime", DWORD)]
@@ -205,6 +212,8 @@ class System(object):
 
     @staticmethod
     def inode(path):
+        path = fspath(path)
+
         if System.is_unix():
             import ctypes
 
@@ -215,7 +224,7 @@ class System(object):
             inode = ctypes.c_ulong(inode).value
         else:
             # getdirinfo from ntfsutils works on both files and dirs
-            info = System.getdirinfo(path)
+            info = System._getdirinfo(path)
             inode = abs(
                 hash(
                     (
@@ -237,8 +246,7 @@ class System(object):
         from ctypes.wintypes import DWORD, HANDLE
 
         # https://docs.microsoft.com/en-us/windows/desktop/api/synchapi/nf-synchapi-waitforsingleobject
-        WAIT_OBJECT_0 = 0
-        WAIT_TIMEOUT = 0x00000102
+        from win32event import WAIT_OBJECT_0, WAIT_TIMEOUT
 
         func = ctypes.windll.kernel32.WaitForSingleObject
         func.argtypes = [HANDLE, DWORD]
@@ -267,22 +275,26 @@ class System(object):
 
     @staticmethod
     def is_symlink(path):
+        path = fspath(path)
+
         if System.is_unix():
             return os.path.islink(path)
 
         # https://docs.microsoft.com/en-us/windows/desktop/fileio/
         # file-attribute-constants
-        FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+        from winnt import FILE_ATTRIBUTE_REPARSE_POINT
 
         if os.path.lexists(path):
-            info = System.getdirinfo(path)
+            info = System._getdirinfo(path)
             return info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT
         return False
 
     @staticmethod
     def is_hardlink(path):
+        path = fspath(path)
+
         if System.is_unix():
             return os.stat(path).st_nlink > 1
 
-        info = System.getdirinfo(path)
+        info = System._getdirinfo(path)
         return info.nNumberOfLinks > 1

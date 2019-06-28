@@ -2,7 +2,9 @@ import errno
 import os
 
 from dvc.ignore import DvcIgnoreFilter
+from dvc.utils import relpath
 from dvc.utils.compat import StringIO, BytesIO
+from dvc.exceptions import DvcException
 
 from dvc.scm.tree import BaseTree
 
@@ -31,14 +33,14 @@ class GitTree(BaseTree):
 
     def open(self, path, binary=False):
 
-        relpath = os.path.relpath(path, self.git.working_dir)
+        relative_path = relpath(path, self.git.working_dir)
 
         obj = self.git_object_by_path(path)
         if obj is None:
             msg = "No such file in branch '{}'".format(self.rev)
-            raise IOError(errno.ENOENT, msg, relpath)
+            raise IOError(errno.ENOENT, msg, relative_path)
         if obj.mode == GIT_MODE_DIR:
-            raise IOError(errno.EISDIR, "Is a directory", relpath)
+            raise IOError(errno.EISDIR, "Is a directory", relative_path)
 
         # GitPython's obj.data_stream is a fragile thing, it is better to
         # read it immediately, also it needs to be to decoded if we follow
@@ -76,10 +78,42 @@ class GitTree(BaseTree):
                 return True
         return False
 
+    def _try_fetch_from_remote(self):
+        import git
+
+        try:
+            # checking if tag/branch exists locally
+            self.git.git.show_ref(self.rev, verify=True)
+            return
+        except git.exc.GitCommandError:
+            pass
+
+        try:
+            # checking if it exists on the remote
+            self.git.git.ls_remote("origin", self.rev, exit_code=True)
+            # fetching remote tag/branch so we can reference it locally
+            self.git.git.fetch("origin", "{rev}:{rev}".format(rev=self.rev))
+        except git.exc.GitCommandError:
+            pass
+
     def git_object_by_path(self, path):
-        path = os.path.relpath(os.path.realpath(path), self.git.working_dir)
+        import git
+
+        path = relpath(os.path.realpath(path), self.git.working_dir)
         assert path.split(os.sep, 1)[0] != ".."
-        tree = self.git.tree(self.rev)
+
+        self._try_fetch_from_remote()
+
+        try:
+            tree = self.git.tree(self.rev)
+        except git.exc.BadName as exc:
+            raise DvcException(
+                "revision '{}' not found in git '{}'".format(
+                    self.rev, os.path.relpath(self.git.working_dir)
+                ),
+                cause=exc,
+            )
+
         if not path or path == ".":
             return tree
         for i in path.split(os.sep):

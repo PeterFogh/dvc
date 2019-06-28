@@ -11,9 +11,10 @@ from dvc.main import main
 from dvc import progress
 from dvc.repo import Repo as DvcRepo
 from dvc.system import System
-from dvc.utils import walk_files
+from dvc.utils import walk_files, relpath
 from dvc.utils.stage import load_stage_file, dump_stage_file
-from tests.basic_env import TestDvc
+from dvc.utils.compat import is_py2
+from tests.basic_env import TestDvc, TestDvcGit
 from tests.func.test_repro import TestRepro
 from dvc.stage import Stage, StageFileBadNameError, StageFileDoesNotExistError
 from dvc.remote.local import RemoteLOCAL
@@ -113,7 +114,7 @@ class TestCmdCheckout(TestCheckout):
         self._test_checkout()
 
 
-class CheckoutBase(TestDvc):
+class CheckoutBase(TestDvcGit):
     GIT_IGNORE = ".gitignore"
 
     def commit_data_file(self, fname, content="random text"):
@@ -422,16 +423,20 @@ class TestCheckoutShouldHaveSelfClearingProgressBar(TestDvc):
         self.write_args = [w_c[1][0] for w_c in write_calls]
 
         pattern = re.compile(".*\\[.{30}\\].*%.*")
-        progress_bars = [arg for arg in self.write_args if pattern.match(arg)]
+        progress_bars = [
+            arg
+            for arg in self.write_args
+            if pattern.match(arg) and "unpacked" not in arg
+        ]
 
         update_bars = progress_bars[:-1]
         finish_bar = progress_bars[-1]
 
         self.assertEqual(4, len(update_bars))
-        self.assertRegexpMatches(progress_bars[0], ".*\\[#{7} {23}\\] 25%.*")
-        self.assertRegexpMatches(progress_bars[1], ".*\\[#{15} {15}\\] 50%.*")
-        self.assertRegexpMatches(progress_bars[2], ".*\\[#{22} {8}\\] 75%.*")
-        self.assertRegexpMatches(progress_bars[3], ".*\\[#{30}\\] 100%.*")
+        assert re.search(".*\\[#{7} {23}\\] 25%.*", progress_bars[0])
+        assert re.search(".*\\[#{15} {15}\\] 50%.*", progress_bars[1])
+        assert re.search(".*\\[#{22} {8}\\] 75%.*", progress_bars[2])
+        assert re.search(".*\\[#{30}\\] 100%.*", progress_bars[3])
 
         self.assertCaretReturnFollowsEach(update_bars)
         self.assertNewLineFollows(finish_bar)
@@ -517,8 +522,10 @@ class TestCheckoutRecursiveNotDirectory(TestDvc):
         ret = main(["add", self.FOO])
         self.assertEqual(0, ret)
 
-        with self.assertRaises(TargetNotDirectoryError):
-            self.dvc.checkout(target=self.FOO, recursive=True)
+        try:
+            self.dvc.checkout(target=self.FOO + ".dvc", recursive=True)
+        except TargetNotDirectoryError:
+            self.fail("should not raise TargetNotDirectoryError")
 
 
 class TestCheckoutMovedCacheDirWithSymlinks(TestDvc):
@@ -532,7 +539,7 @@ class TestCheckoutMovedCacheDirWithSymlinks(TestDvc):
         ret = main(["add", self.DATA_DIR])
         self.assertEqual(ret, 0)
 
-        if os.name == "nt":
+        if os.name == "nt" and is_py2:
             from jaraco.windows.filesystem import readlink
         else:
             readlink = os.readlink
@@ -560,11 +567,11 @@ class TestCheckoutMovedCacheDirWithSymlinks(TestDvc):
         new_data_link = readlink(self.DATA)
 
         self.assertEqual(
-            os.path.relpath(old_foo_link, old_cache_dir),
-            os.path.relpath(new_foo_link, new_cache_dir),
+            relpath(old_foo_link, old_cache_dir),
+            relpath(new_foo_link, new_cache_dir),
         )
 
         self.assertEqual(
-            os.path.relpath(old_data_link, old_cache_dir),
-            os.path.relpath(new_data_link, new_cache_dir),
+            relpath(old_data_link, old_cache_dir),
+            relpath(new_data_link, new_cache_dir),
         )

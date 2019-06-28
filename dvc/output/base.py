@@ -1,12 +1,14 @@
 from __future__ import unicode_literals
 
-import re
 import logging
+from copy import copy
+
 from schema import Or, Optional
 
+import dvc.prompt as prompt
 from dvc.exceptions import DvcException
-from dvc.utils.compat import str
-from dvc.remote.base import RemoteBase
+from dvc.utils.compat import str, urlparse
+from dvc.remote.base import RemoteBASE
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ class OutputAlreadyTrackedError(DvcException):
 class OutputBase(object):
     IS_DEPENDENCY = False
 
-    REMOTE = RemoteBase
+    REMOTE = RemoteBASE
 
     PARAM_PATH = "path"
     PARAM_CACHE = "cache"
@@ -56,6 +58,8 @@ class OutputBase(object):
     DoesNotExistError = OutputDoesNotExistError
     IsNotFileOrDirError = OutputIsNotFileOrDirError
 
+    sep = "/"
+
     def __init__(
         self,
         stage,
@@ -67,9 +71,19 @@ class OutputBase(object):
         persist=False,
         tags=None,
     ):
+        # This output (and dependency) objects have too many paths/urls
+        # here is a list and comments:
+        #
+        #   .def_path - path from definition in stage file
+        #   .path_info - PathInfo/URLInfo structured resolved path
+        #   .fspath - local only, resolved
+        #   .__str__ - for presentation purposes, def_path/relpath
+        #
+        # By resolved path, which contains actual location,
+        # should be absolute and don't contain remote:// refs.
         self.stage = stage
-        self.repo = stage.repo
-        self.url = path
+        self.repo = stage.repo if stage else None
+        self.def_path = path
         self.info = info
         self.remote = remote or self.REMOTE(self.repo, {})
         self.use_cache = False if self.IS_DEPENDENCY else cache
@@ -84,15 +98,26 @@ class OutputBase(object):
                 )
             )
 
-        self.path_info = {"scheme": self.scheme, "url": self.url}
+        self.path_info = self._parse_path(remote, path)
+
+    def _parse_path(self, remote, path):
+        if remote:
+            parsed = urlparse(path)
+            return remote.path_info / parsed.path.lstrip("/")
+        else:
+            return self.REMOTE.path_cls(path)
 
     def __repr__(self):
-        return "{class_name}: '{url}'".format(
-            class_name=type(self).__name__, url=(self.url or "No url")
+        return "{class_name}: '{def_path}'".format(
+            class_name=type(self).__name__, def_path=self.def_path
         )
 
     def __str__(self):
-        return self.url
+        return self.def_path
+
+    @property
+    def scheme(self):
+        return self.REMOTE.scheme
 
     @property
     def is_in_repo(self):
@@ -112,34 +137,12 @@ class OutputBase(object):
         )
 
     @classmethod
-    def match(cls, url):
-        return re.match(cls.REMOTE.REGEX, url)
-
-    def group(self, name):
-        match = self.match(self.url)
-        if not match:
-            return None
-        return match.group(name)
-
-    @classmethod
     def supported(cls, url):
-        return cls.match(url) is not None
-
-    @property
-    def scheme(self):
-        return self.REMOTE.scheme
-
-    @property
-    def path(self):
-        return self.path_info["path"]
+        return cls.REMOTE.supported(url)
 
     @property
     def cache_path(self):
-        return self.cache.checksum_to_path(self.checksum)
-
-    @property
-    def sep(self):
-        return "/"
+        return self.cache.checksum_to_path_info(self.checksum).url
 
     @property
     def checksum(self):
@@ -228,11 +231,11 @@ class OutputBase(object):
             return
 
         if self.is_in_repo:
-            if self.repo.scm.is_tracked(self.path):
+            if self.repo.scm.is_tracked(self.fspath):
                 raise OutputAlreadyTrackedError(self)
 
             if self.use_cache:
-                self.repo.scm.ignore(self.path)
+                self.repo.scm.ignore(self.fspath)
 
         self.info = self.remote.save_info(self.path_info)
 
@@ -241,8 +244,8 @@ class OutputBase(object):
             self.cache.save(self.path_info, self.info)
 
     def dumpd(self):
-        ret = self.info.copy()
-        ret[self.PARAM_PATH] = self.url
+        ret = copy(self.info)
+        ret[self.PARAM_PATH] = self.def_path
 
         if self.IS_DEPENDENCY:
             return ret
@@ -269,8 +272,8 @@ class OutputBase(object):
             "verify metric is not supported for {}".format(self.scheme)
         )
 
-    def download(self, to_info, resume=False):
-        self.remote.download([self.path_info], [to_info], resume=resume)
+    def download(self, to, resume=False):
+        self.remote.download([self.path_info], [to.path_info], resume=resume)
 
     def checkout(self, force=False, progress_callback=None, tag=None):
         if not self.use_cache:
@@ -294,20 +297,20 @@ class OutputBase(object):
             return
 
         if ignore_remove and self.use_cache and self.is_in_repo:
-            self.repo.scm.ignore_remove(self.path)
+            self.repo.scm.ignore_remove(self.fspath)
 
     def move(self, out):
         if self.scheme == "local" and self.use_cache and self.is_in_repo:
-            self.repo.scm.ignore_remove(self.path)
+            self.repo.scm.ignore_remove(self.fspath)
 
         self.remote.move(self.path_info, out.path_info)
-        self.url = out.url
-        self.path_info = out.path_info.copy()
+        self.def_path = out.def_path
+        self.path_info = out.path_info
         self.save()
         self.commit()
 
         if self.scheme == "local" and self.use_cache and self.is_in_repo:
-            self.repo.scm.ignore(self.path)
+            self.repo.scm.ignore(self.fspath)
 
     def get_files_number(self):
         if not self.use_cache or not self.checksum:
@@ -321,3 +324,96 @@ class OutputBase(object):
     def unprotect(self):
         if self.exists:
             self.remote.unprotect(self.path_info)
+
+    def _collect_used_dir_cache(self, remote=None, force=False, jobs=None):
+        """Get a list of `info`s retaled to the given directory.
+
+        - Pull the directory entry from the remote cache if it was changed.
+
+        Example:
+
+            Given the following commands:
+
+            $ echo "foo" > directory/foo
+            $ echo "bar" > directory/bar
+            $ dvc add directory
+
+            It will return something similar to the following list:
+
+            [
+                { 'path': 'directory/foo', 'md5': 'c157a79031e1', ... },
+                { 'path': 'directory/bar', 'md5': 'd3b07384d113', ... },
+            ]
+        """
+
+        ret = []
+
+        if self.cache.changed_cache_file(self.checksum):
+            try:
+                self.repo.cloud.pull(
+                    [
+                        {
+                            self.remote.PARAM_CHECKSUM: self.checksum,
+                            "name": str(self),
+                        }
+                    ],
+                    jobs=jobs,
+                    remote=remote,
+                    show_checksums=False,
+                )
+            except DvcException:
+                logger.debug("failed to pull cache for '{}'".format(self))
+
+        if self.cache.changed_cache_file(self.checksum):
+            msg = (
+                "Missing cache for directory '{}'. "
+                "Cache for files inside will be lost. "
+                "Would you like to continue? Use '-f' to force."
+            )
+            if not force and not prompt.confirm(msg):
+                raise DvcException(
+                    "unable to fully collect used cache"
+                    " without cache for directory '{}'".format(self)
+                )
+            else:
+                return ret
+
+        for entry in self.dir_cache:
+            info = copy(entry)
+            path_info = self.path_info / entry[self.remote.PARAM_RELPATH]
+            info["name"] = str(path_info)
+            ret.append(info)
+
+        return ret
+
+    def get_used_cache(self, **kwargs):
+        """Get a dumpd of the given `out`, with an entry including the branch.
+
+        The `used_cache` of an output is no more than its `info`.
+
+        In case that the given output is a directory, it will also
+        include the `info` of its files.
+        """
+
+        if self.stage.is_repo_import:
+            return []
+
+        if not self.use_cache:
+            return []
+
+        if not self.info:
+            logger.warning(
+                "Output '{}'({}) is missing version info. Cache for it will "
+                "not be collected. Use dvc repro to get your pipeline up to "
+                "date.".format(self, self.stage)
+            )
+            return []
+
+        ret = [{self.remote.PARAM_CHECKSUM: self.checksum, "name": str(self)}]
+
+        if not self.is_dir_checksum:
+            return ret
+
+        ret.extend(self._collect_used_dir_cache(**kwargs))
+
+        return ret

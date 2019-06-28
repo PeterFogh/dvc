@@ -38,10 +38,13 @@ def append_doc_link(help_message, path):
 class CmdBase(object):
     def __init__(self, args):
         from dvc.repo import Repo
+        from dvc.updater import Updater
 
         self.repo = Repo()
         self.config = self.repo.config
         self.args = args
+        updater = Updater(self.repo.dvc_dir)
+        updater.check()
 
     @property
     def default_targets(self):
@@ -65,3 +68,11 @@ class CmdBase(object):
     # Abstract methods that have to be implemented by any inheritance class
     def run(self):
         pass
+
+
+class CmdBaseNoRepo(CmdBase):
+    def __init__(self, args):
+        self.args = args
+
+    def run_cmd(self):
+        return self.run()

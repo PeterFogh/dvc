@@ -1,14 +1,19 @@
 from __future__ import unicode_literals
 
+import errno
 import os
 import csv
 import json
 import logging
-from jsonpath_rw import parse
+
+from jsonpath_ng.ext import parse
 
 from dvc.exceptions import OutputNotFoundError, BadMetricError, NoMetricsError
 from dvc.utils.compat import builtin_str, open, StringIO, csv_reader
 
+NO_METRICS_FILE_AT_REFERENCE_WARNING = (
+    "Metrics file '{}' does not exist at the reference '{}'."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +134,7 @@ def _format_output(content, typ):
     return content
 
 
-def _read_metric(fd, typ=None, xpath=None, rel_path=None, branch=None):
+def _read_metric(fd, typ=None, xpath=None, fname=None, branch=None):
     typ = typ.lower().strip() if typ else typ
     try:
         if xpath:
@@ -141,13 +146,13 @@ def _read_metric(fd, typ=None, xpath=None, rel_path=None, branch=None):
     except Exception:
         logger.exception(
             "unable to read metric in '{}' in branch '{}'".format(
-                rel_path, branch
+                fname, branch
             )
         )
         return None
 
 
-def _collect_metrics(self, path, recursive, typ, xpath, branch):
+def _collect_metrics(repo, path, recursive, typ, xpath, branch):
     """Gather all the metric outputs.
 
     Args:
@@ -165,14 +170,14 @@ def _collect_metrics(self, path, recursive, typ, xpath, branch):
             - typ:
             - xpath:
     """
-    outs = [out for stage in self.stages() for out in stage.outs]
+    outs = [out for stage in repo.stages() for out in stage.outs]
 
     if path:
         try:
-            outs = self.find_outs_by_path(path, outs=outs, recursive=recursive)
+            outs = repo.find_outs_by_path(path, outs=outs, recursive=recursive)
         except OutputNotFoundError:
             logger.debug(
-                "stage file not for found for '{}' in branch '{}'".format(
+                "DVC-file not for found for '{}' in branch '{}'".format(
                     path, branch
                 )
             )
@@ -195,16 +200,7 @@ def _collect_metrics(self, path, recursive, typ, xpath, branch):
     return res
 
 
-def _read_metrics_filesystem(path, typ, xpath, rel_path, branch):
-    if not os.path.exists(path):
-        return None
-    with open(path, "r") as fd:
-        return _read_metric(
-            fd, typ=typ, xpath=xpath, rel_path=rel_path, branch=branch
-        )
-
-
-def _read_metrics(self, metrics, branch):
+def _read_metrics(repo, metrics, branch):
     """Read the content of each metric file and format it.
 
     Args:
@@ -224,35 +220,40 @@ def _read_metrics(self, metrics, branch):
     for out, typ, xpath in metrics:
         assert out.scheme == "local"
         if not typ:
-            typ = os.path.splitext(out.path.lower())[1].replace(".", "")
+            typ = os.path.splitext(out.fspath.lower())[1].replace(".", "")
         if out.use_cache:
-            metric = _read_metrics_filesystem(
-                self.cache.local.get(out.checksum),
-                typ=typ,
-                xpath=xpath,
-                rel_path=out.rel_path,
-                branch=branch,
-            )
+            open_fun = open
+            path = repo.cache.local.get(out.checksum)
         else:
-            with self.tree.open(out.path) as fd:
+            open_fun = repo.tree.open
+            path = out.fspath
+        try:
+
+            with open_fun(path) as fd:
                 metric = _read_metric(
-                    fd,
-                    typ=typ,
-                    xpath=xpath,
-                    rel_path=out.rel_path,
-                    branch=branch,
+                    fd, typ=typ, xpath=xpath, fname=str(out), branch=branch
                 )
+        except IOError as e:
+            if e.errno == errno.ENOENT:
+                logger.warning(
+                    NO_METRICS_FILE_AT_REFERENCE_WARNING.format(
+                        out.path_info, branch
+                    )
+                )
+                metric = None
+            else:
+                raise
 
         if not metric:
             continue
 
-        res[out.rel_path] = metric
+        res[str(out)] = metric
 
     return res
 
 
 def show(
-    self,
+    repo,
     path=None,
     typ=None,
     xpath=None,
@@ -262,9 +263,9 @@ def show(
 ):
     res = {}
 
-    for branch in self.brancher(all_branches=all_branches, all_tags=all_tags):
-        entries = _collect_metrics(self, path, recursive, typ, xpath, branch)
-        metrics = _read_metrics(self, entries, branch)
+    for branch in repo.brancher(all_branches=all_branches, all_tags=all_tags):
+        entries = _collect_metrics(repo, path, recursive, typ, xpath, branch)
+        metrics = _read_metrics(repo, entries, branch)
         if metrics:
             res[branch] = metrics
 

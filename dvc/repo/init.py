@@ -1,5 +1,4 @@
 import os
-import shutil
 import colorama
 import logging
 
@@ -7,8 +6,7 @@ from dvc.repo import Repo
 from dvc.scm import SCM, NoSCM
 from dvc.config import Config
 from dvc.exceptions import InitError
-from dvc.utils import boxify
-
+from dvc.utils import boxify, relpath, remove
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +57,7 @@ def init(root_dir=os.curdir, no_scm=False, force=False):
     Raises:
         KeyError: Raises an exception.
     """
-    root_dir = os.path.abspath(root_dir)
+    root_dir = os.path.realpath(root_dir)
     dvc_dir = os.path.join(root_dir, Repo.DVC_DIR)
     scm = SCM(root_dir)
     if isinstance(scm, NoSCM) and not no_scm:
@@ -74,11 +72,11 @@ def init(root_dir=os.curdir, no_scm=False, force=False):
         if not force:
             raise InitError(
                 "'{repo}' exists. Use '-f' to force.".format(
-                    repo=os.path.relpath(dvc_dir)
+                    repo=relpath(dvc_dir)
                 )
             )
 
-        shutil.rmtree(dvc_dir)
+        remove(dvc_dir)
 
     os.mkdir(dvc_dir)
 

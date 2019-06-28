@@ -1,5 +1,8 @@
 from __future__ import unicode_literals
-from dvc.utils.compat import open, makedirs
+
+from dvc.scheme import Schemes
+
+from dvc.utils.compat import open, makedirs, fspath_py35
 
 import os
 import threading
@@ -9,7 +12,7 @@ import logging
 from dvc.progress import progress
 from dvc.exceptions import DvcException
 from dvc.config import Config
-from dvc.remote.base import RemoteBase
+from dvc.remote.base import RemoteBASE
 from dvc.utils import move
 
 
@@ -29,51 +32,45 @@ class ProgressBarCallback(object):
             progress.update_target(self.name, self.current, self.total)
 
 
-class RemoteHTTP(RemoteBase):
-    scheme = "http"
-    REGEX = r"^https?://.*$"
+class RemoteHTTP(RemoteBASE):
+    scheme = Schemes.HTTP
     REQUEST_TIMEOUT = 10
     CHUNK_SIZE = 2 ** 16
     PARAM_CHECKSUM = "etag"
 
     def __init__(self, repo, config):
         super(RemoteHTTP, self).__init__(repo, config)
-        self.cache_dir = config.get(Config.SECTION_REMOTE_URL)
-        self.url = self.cache_dir
-        self.path_info = {"scheme": "http"}
 
-    @property
-    def prefix(self):
-        return self.cache_dir
+        url = config.get(Config.SECTION_REMOTE_URL)
+        self.path_info = self.path_cls(url) if url else None
 
     def download(
         self,
         from_infos,
         to_infos,
-        no_progress_bar=False,
         names=None,
+        no_progress_bar=False,
         resume=False,
     ):
         names = self._verify_path_args(to_infos, from_infos, names)
+        fails = 0
 
         for to_info, from_info, name in zip(to_infos, from_infos, names):
-            if from_info["scheme"] not in ["http", "https"]:
+            if from_info.scheme != self.scheme:
                 raise NotImplementedError
 
-            if to_info["scheme"] != "local":
+            if to_info.scheme != "local":
                 raise NotImplementedError
 
-            msg = "Downloading '{}' to '{}'".format(
-                from_info["path"], to_info["path"]
-            )
+            msg = "Downloading '{}' to '{}'".format(from_info, to_info)
             logger.debug(msg)
 
             if not name:
-                name = os.path.basename(to_info["path"])
+                name = to_info.name
 
-            makedirs(os.path.dirname(to_info["path"]), exist_ok=True)
+            makedirs(fspath_py35(to_info.parent), exist_ok=True)
 
-            total = self._content_length(from_info["path"])
+            total = self._content_length(from_info.url)
 
             if no_progress_bar or not total:
                 cb = None
@@ -82,38 +79,37 @@ class RemoteHTTP(RemoteBase):
 
             try:
                 self._download_to(
-                    from_info["path"],
-                    to_info["path"],
-                    callback=cb,
-                    resume=resume,
+                    from_info.url, to_info.fspath, callback=cb, resume=resume
                 )
 
             except Exception:
-                msg = "failed to download '{}'".format(from_info["path"])
+                fails += 1
+                msg = "failed to download '{}'".format(from_info)
                 logger.exception(msg)
                 continue
 
             if not no_progress_bar:
                 progress.finish_target(name)
 
+        return fails
+
     def exists(self, path_info):
-        assert not isinstance(path_info, list)
-        assert path_info["scheme"] in ["http", "https"]
-        return bool(self._request("HEAD", path_info.get("path")))
+        return bool(self._request("HEAD", path_info.url))
 
-    def cache_exists(self, md5s):
-        assert isinstance(md5s, list)
+    def batch_exists(self, path_infos, callback):
+        results = []
 
-        def func(md5):
-            return bool(self._request("HEAD", self.checksum_to_path(md5)))
+        for path_info in path_infos:
+            results.append(self.exists(path_info))
+            callback.update(str(path_info))
 
-        return list(filter(func, md5s))
+        return results
 
     def _content_length(self, url):
         return self._request("HEAD", url).headers.get("Content-Length")
 
     def get_file_checksum(self, path_info):
-        url = path_info["path"]
+        url = path_info.url
         etag = self._request("HEAD", url).headers.get("ETag") or self._request(
             "HEAD", url
         ).headers.get("Content-MD5")

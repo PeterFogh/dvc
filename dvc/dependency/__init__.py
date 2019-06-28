@@ -2,6 +2,8 @@ from __future__ import unicode_literals
 
 import schema
 
+from dvc.scheme import Schemes
+
 import dvc.output as output
 from dvc.output.base import OutputBase
 from dvc.dependency.s3 import DependencyS3
@@ -10,26 +12,31 @@ from dvc.dependency.local import DependencyLOCAL
 from dvc.dependency.hdfs import DependencyHDFS
 from dvc.dependency.ssh import DependencySSH
 from dvc.dependency.http import DependencyHTTP
+from dvc.dependency.https import DependencyHTTPS
+from .repo import DependencyREPO
 
 from dvc.remote import Remote
+from dvc.external_repo import ExternalRepo
+
 
 DEPS = [
     DependencyGS,
     DependencyHDFS,
     DependencyHTTP,
+    DependencyHTTPS,
     DependencyS3,
     DependencySSH,
     # NOTE: DependencyLOCAL is the default choice
 ]
 
 DEP_MAP = {
-    "local": DependencyLOCAL,
-    "ssh": DependencySSH,
-    "s3": DependencyS3,
-    "gs": DependencyGS,
-    "hdfs": DependencyHDFS,
-    "http": DependencyHTTP,
-    "https": DependencyHTTP,
+    Schemes.LOCAL: DependencyLOCAL,
+    Schemes.SSH: DependencySSH,
+    Schemes.S3: DependencyS3,
+    Schemes.GS: DependencyGS,
+    Schemes.HDFS: DependencyHDFS,
+    Schemes.HTTP: DependencyHTTP,
+    Schemes.HTTPS: DependencyHTTPS,
 }
 
 
@@ -40,6 +47,7 @@ DEP_MAP = {
 SCHEMA = output.SCHEMA.copy()
 del SCHEMA[schema.Optional(OutputBase.PARAM_CACHE)]
 del SCHEMA[schema.Optional(OutputBase.PARAM_METRIC)]
+SCHEMA[schema.Optional(DependencyREPO.PARAM_REPO)] = ExternalRepo.SCHEMA
 
 
 def _get(stage, p, info):
@@ -48,9 +56,12 @@ def _get(stage, p, info):
     parsed = urlparse(p)
 
     if parsed.scheme == "remote":
-        settings = stage.repo.config.get_remote_settings(parsed.netloc)
-        remote = Remote(stage.repo, settings)
+        remote = Remote(stage.repo, name=parsed.netloc)
         return DEP_MAP[remote.scheme](stage, p, info, remote=remote)
+
+    if info and info.get(DependencyREPO.PARAM_REPO):
+        repo = info.pop(DependencyREPO.PARAM_REPO)
+        return DependencyREPO(repo, stage, p, info)
 
     for d in DEPS:
         if d.supported(p):
@@ -66,8 +77,9 @@ def loadd_from(stage, d_list):
     return ret
 
 
-def loads_from(stage, s_list):
+def loads_from(stage, s_list, erepo=None):
     ret = []
     for s in s_list:
-        ret.append(_get(stage, s, {}))
+        info = {DependencyREPO.PARAM_REPO: erepo} if erepo else {}
+        ret.append(_get(stage, s, info))
     return ret

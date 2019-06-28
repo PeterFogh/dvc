@@ -4,8 +4,9 @@ from __future__ import unicode_literals
 
 from dvc.utils.compat import str, builtin_str
 
-import os
 import traceback
+
+from dvc.utils import relpath
 
 
 class DvcException(Exception):
@@ -61,8 +62,8 @@ class OutputNotFoundError(DvcException):
 
     def __init__(self, output):
         super(OutputNotFoundError, self).__init__(
-            "unable to find stage file with output '{path}'".format(
-                path=os.path.relpath(output)
+            "unable to find DVC-file with output '{path}'".format(
+                path=relpath(output)
             )
         )
 
@@ -73,7 +74,7 @@ class StagePathAsOutputError(DvcException):
 
     Args:
         cwd (str): path to the directory.
-        fname (str): path to the stage file that has cwd specified as an
+        fname (str): path to the DVC-file that has cwd specified as an
             output.
     """
 
@@ -98,9 +99,7 @@ class CircularDependencyError(DvcException):
     """
 
     def __init__(self, dependency):
-        assert isinstance(dependency, str) or isinstance(
-            dependency, builtin_str
-        )
+        assert isinstance(dependency, (str, builtin_str))
 
         msg = (
             "file/directory '{}' is specified as an output and as a "
@@ -118,7 +117,7 @@ class ArgumentDuplicationError(DvcException):
     """
 
     def __init__(self, path):
-        assert isinstance(path, str) or isinstance(path, builtin_str)
+        assert isinstance(path, (str, builtin_str))
         msg = "file '{}' is specified more than once."
         super(ArgumentDuplicationError, self).__init__(msg.format(path))
 
@@ -200,7 +199,7 @@ class BadMetricError(DvcException):
     def __init__(self, path):
         super(BadMetricError, self).__init__(
             "'{}' does not exist, not a metric or is malformed".format(
-                os.path.relpath(path)
+                relpath(path)
             )
         )
 
@@ -215,9 +214,9 @@ class NoMetricsError(DvcException):
 
 class StageFileCorruptedError(DvcException):
     def __init__(self, path, cause=None):
-        path = os.path.relpath(path)
+        path = relpath(path)
         super(StageFileCorruptedError, self).__init__(
-            "unable to read stage file: {} "
+            "unable to read DVC-file: {} "
             "YAML file structure is corrupted".format(path),
             cause=cause,
         )

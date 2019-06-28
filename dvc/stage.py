@@ -7,7 +7,11 @@ import re
 import os
 import subprocess
 import logging
+import signal
+import threading
 
+from dvc.utils import relpath
+from dvc.utils.compat import pathlib
 from dvc.utils.fs import contains_symlink_up_to
 from schema import Schema, SchemaError, Optional, Or, And
 
@@ -31,7 +35,7 @@ class StageCmdFailedError(DvcException):
 
 class StageFileFormatError(DvcException):
     def __init__(self, fname, e):
-        msg = "stage file '{}' format error: {}".format(fname, str(e))
+        msg = "DVC-file '{}' format error: {}".format(fname, str(e))
         super(StageFileFormatError, self).__init__(msg)
 
 
@@ -54,7 +58,7 @@ class StageFileAlreadyExistsError(DvcException):
 
 class StageFileIsNotDvcFileError(DvcException):
     def __init__(self, fname):
-        msg = "'{}' is not a dvc file".format(fname)
+        msg = "'{}' is not a DVC-file".format(fname)
 
         sname = fname + Stage.STAGE_FILE_SUFFIX
         if Stage.is_stage_file(sname):
@@ -175,11 +179,11 @@ class Stage(object):
 
     @property
     def relpath(self):
-        return os.path.relpath(self.path)
+        return relpath(self.path)
 
     @property
     def is_data_source(self):
-        """Whether the stage file was created with `dvc add` or `dvc import`"""
+        """Whether the DVC-file was created with `dvc add` or `dvc import`"""
         return self.cmd is None
 
     @staticmethod
@@ -209,8 +213,15 @@ class Stage(object):
 
     @property
     def is_import(self):
-        """Whether the stage file was created with `dvc import`."""
+        """Whether the DVC-file was created with `dvc import`."""
         return not self.cmd and len(self.deps) == 1 and len(self.outs) == 1
+
+    @property
+    def is_repo_import(self):
+        if not self.is_import:
+            return False
+
+        return isinstance(self.deps[0], dependency.DependencyREPO)
 
     def _changed_deps(self):
         if self.locked:
@@ -218,7 +229,7 @@ class Stage(object):
 
         if self.is_callback:
             logger.warning(
-                "Dvc file '{fname}' is a 'callback' stage "
+                "DVC-file '{fname}' is a 'callback' stage "
                 "(has a command and no dependencies) and thus always "
                 "considered as changed.".format(fname=self.relpath)
             )
@@ -253,7 +264,7 @@ class Stage(object):
 
     def _changed_md5(self):
         if self.changed_md5():
-            logger.warning("Dvc file '{}' changed.".format(self.relpath))
+            logger.warning("DVC-file '{}' changed.".format(self.relpath))
             return True
         return False
 
@@ -286,8 +297,11 @@ class Stage(object):
         for out in self.outs:
             out.unprotect()
 
-    def remove(self, force=False):
-        self.remove_outs(ignore_remove=True, force=force)
+    def remove(self, force=False, remove_outs=True):
+        if remove_outs:
+            self.remove_outs(ignore_remove=True, force=force)
+        else:
+            self.unprotect_outs()
         os.unlink(self.path)
 
     def reproduce(
@@ -322,32 +336,20 @@ class Stage(object):
             raise StageFileFormatError(fname, exc)
 
     @classmethod
-    def _stage_fname(cls, fname, outs, add):
-        if fname:
-            return fname
-
+    def _stage_fname(cls, outs, add):
         if not outs:
             return cls.STAGE_FILE
 
         out = outs[0]
-        path_handler = out.remote.ospath
+        fname = out.path_info.name + cls.STAGE_FILE_SUFFIX
 
-        fname = path_handler.basename(out.path) + cls.STAGE_FILE_SUFFIX
-
-        fname = Stage._expand_to_path_on_add_local(
-            add, fname, out, path_handler
-        )
-
-        return fname
-
-    @staticmethod
-    def _expand_to_path_on_add_local(add, fname, out, path_handler):
         if (
             add
             and out.is_in_repo
-            and not contains_symlink_up_to(out.path, out.repo.root_dir)
+            and not contains_symlink_up_to(out.fspath, out.repo.root_dir)
         ):
-            fname = path_handler.join(path_handler.dirname(out.path), fname)
+            fname = out.path_info.with_name(fname).fspath
+
         return fname
 
     @staticmethod
@@ -430,6 +432,7 @@ class Stage(object):
         validate_state=True,
         outs_persist=None,
         outs_persist_no_cache=None,
+        erepo=None,
     ):
         if outs is None:
             outs = []
@@ -450,9 +453,9 @@ class Stage(object):
         if wdir is None and cwd is not None:
             if fname is not None and os.path.basename(fname) != fname:
                 raise StageFileBadNameError(
-                    "stage file name '{fname}' may not contain subdirectories"
+                    "DVC-file name '{fname}' may not contain subdirectories"
                     " if '-c|--cwd' (deprecated) is specified. Use '-w|--wdir'"
-                    " along with '-f' to specify stage file path and working"
+                    " along with '-f' to specify DVC-file path with working"
                     " directory.".format(fname=fname)
                 )
             wdir = cwd
@@ -470,12 +473,15 @@ class Stage(object):
             outs_persist,
             outs_persist_no_cache,
         )
-        stage.deps = dependency.loads_from(stage, deps)
+        stage.deps = dependency.loads_from(stage, deps, erepo=erepo)
 
         stage._check_circular_dependency()
         stage._check_duplicated_arguments()
 
-        fname = Stage._stage_fname(fname, stage.outs, add=add)
+        if not fname:
+            fname = Stage._stage_fname(stage.outs, add=add)
+        stage._check_dvc_filename(fname)
+
         wdir = os.path.abspath(wdir)
 
         if cwd is not None:
@@ -553,9 +559,9 @@ class Stage(object):
     def _check_dvc_filename(fname):
         if not Stage.is_valid_filename(fname):
             raise StageFileBadNameError(
-                "bad stage filename '{}'. Stage files should be named"
+                "bad DVC-file name '{}'. DVC-files should be named"
                 " 'Dvcfile' or have a '.dvc' suffix (e.g. '{}.dvc').".format(
-                    os.path.relpath(fname), os.path.basename(fname)
+                    relpath(fname), os.path.basename(fname)
                 )
             )
 
@@ -583,7 +589,7 @@ class Stage(object):
 
         # it raises the proper exceptions by priority:
         # 1. when the file doesn't exists
-        # 2. filename is not a dvc filename
+        # 2. filename is not a DVC-file
         # 3. path doesn't represent a regular file
         Stage._check_file_exists(repo, fname)
         Stage._check_dvc_filename(fname)
@@ -595,7 +601,7 @@ class Stage(object):
         # looses keys in deps and outs load
         state = copy.deepcopy(d)
 
-        Stage.validate(d, fname=os.path.relpath(fname))
+        Stage.validate(d, fname=relpath(fname))
         path = os.path.abspath(fname)
 
         stage = Stage(
@@ -619,16 +625,13 @@ class Stage(object):
         return stage
 
     def dumpd(self):
-        from dvc.remote.base import RemoteBase
-
+        rel_wdir = relpath(self.wdir, os.path.dirname(self.path))
         return {
             key: value
             for key, value in {
                 Stage.PARAM_MD5: self.md5,
                 Stage.PARAM_CMD: self.cmd,
-                Stage.PARAM_WDIR: RemoteBase.to_posixpath(
-                    os.path.relpath(self.wdir, os.path.dirname(self.path))
-                ),
+                Stage.PARAM_WDIR: pathlib.PurePath(rel_wdir).as_posix(),
                 Stage.PARAM_LOCKED: self.locked,
                 Stage.PARAM_DEPS: [d.dumpd() for d in self.deps],
                 Stage.PARAM_OUTS: [o.dumpd() for o in self.outs],
@@ -643,15 +646,13 @@ class Stage(object):
         self._check_dvc_filename(fname)
 
         logger.info(
-            "Saving information to '{file}'.".format(
-                file=os.path.relpath(fname)
-            )
+            "Saving information to '{file}'.".format(file=relpath(fname))
         )
         d = self.dumpd()
         apply_diff(d, self._state)
         dump_stage_file(fname, self._state)
 
-        self.repo.scm.track_file(os.path.relpath(fname))
+        self.repo.scm.track_file(relpath(fname))
 
     def _compute_md5(self):
         from dvc.output.base import OutputBase
@@ -662,10 +663,10 @@ class Stage(object):
         if self.PARAM_MD5 in d.keys():
             del d[self.PARAM_MD5]
 
-        # Ignore the wdir default value. In this case stage file w/o
+        # Ignore the wdir default value. In this case DVC-file w/o
         # wdir has the same md5 as a file with the default value specified.
         # It's important for backward compatibility with pipelines that
-        # didn't have WDIR in their stage files.
+        # didn't have WDIR in their DVC-files.
         if d.get(self.PARAM_WDIR) == ".":
             del d[self.PARAM_WDIR]
 
@@ -695,11 +696,11 @@ class Stage(object):
 
     @staticmethod
     def _changed_entries(entries):
-        ret = []
-        for entry in entries:
-            if entry.checksum and entry.changed_checksum():
-                ret.append(entry.rel_path)
-        return ret
+        return [
+            str(entry)
+            for entry in entries
+            if entry.checksum and entry.changed_checksum()
+        ]
 
     def check_can_commit(self, force):
         changed_deps = self._changed_entries(self.deps)
@@ -751,38 +752,51 @@ class Stage(object):
     def _check_circular_dependency(self):
         from dvc.exceptions import CircularDependencyError
 
-        circular_dependencies = set(d.path for d in self.deps) & set(
-            o.path for o in self.outs
+        circular_dependencies = set(d.path_info for d in self.deps) & set(
+            o.path_info for o in self.outs
         )
 
         if circular_dependencies:
-            raise CircularDependencyError(circular_dependencies.pop())
+            raise CircularDependencyError(str(circular_dependencies.pop()))
 
     def _check_duplicated_arguments(self):
         from dvc.exceptions import ArgumentDuplicationError
         from collections import Counter
 
-        path_counts = Counter(edge.path for edge in self.deps + self.outs)
+        path_counts = Counter(edge.path_info for edge in self.deps + self.outs)
 
         for path, occurrence in path_counts.items():
             if occurrence > 1:
-                raise ArgumentDuplicationError(path)
+                raise ArgumentDuplicationError(str(path))
 
     def _run(self):
         self._check_missing_deps()
         executable = os.getenv("SHELL") if os.name != "nt" else None
         self._warn_if_fish(executable)
 
-        p = subprocess.Popen(
-            self.cmd,
-            cwd=self.wdir,
-            shell=True,
-            env=fix_env(os.environ),
-            executable=executable,
+        main_thread = isinstance(
+            threading.current_thread(), threading._MainThread
         )
-        p.communicate()
+        if main_thread:
+            old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        if p.returncode != 0:
+        p = None
+
+        try:
+            p = subprocess.Popen(
+                self.cmd,
+                cwd=self.wdir,
+                shell=True,
+                env=fix_env(os.environ),
+                executable=executable,
+                close_fds=True,
+            )
+            p.communicate()
+        finally:
+            if main_thread:
+                signal.signal(signal.SIGINT, old_handler)
+
+        if (p is None) or (p.returncode != 0):
             raise StageCmdFailedError(self)
 
     def run(self, dry=False, resume=False, no_commit=False, force=False):
@@ -801,16 +815,14 @@ class Stage(object):
         elif self.is_import:
             logger.info(
                 "Importing '{dep}' -> '{out}'".format(
-                    dep=self.deps[0].path, out=self.outs[0].path
+                    dep=self.deps[0], out=self.outs[0]
                 )
             )
             if not dry:
                 if self._already_cached() and not force:
                     self.outs[0].checkout()
                 else:
-                    self.deps[0].download(
-                        self.outs[0].path_info, resume=resume
-                    )
+                    self.deps[0].download(self.outs[0], resume=resume)
 
         elif self.is_data_source:
             msg = "Verifying data sources in '{}'".format(self.relpath)
@@ -836,12 +848,7 @@ class Stage(object):
                 self.commit()
 
     def check_missing_outputs(self):
-        paths = [
-            out.path if out.scheme != "local" else out.rel_path
-            for out in self.outs
-            if not out.exists
-        ]
-
+        paths = [str(out) for out in self.outs if not out.exists]
         if paths:
             raise MissingDataSource(paths)
 

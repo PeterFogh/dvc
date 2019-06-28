@@ -4,6 +4,7 @@ import configobj
 
 from dvc.cache import Cache
 from dvc.main import main
+from dvc.utils import relpath
 
 from tests.basic_env import TestDvc, TestDir
 
@@ -71,13 +72,14 @@ class TestExternalCacheDir(TestDvc):
         self.assertNotEqual(len(os.listdir(cache_dir)), 0)
 
     def test_remote_references(self):
-        assert main(["remote", "add", "storage", "ssh://localhost"]) == 0
+        ssh_url = "ssh://user@localhost:23"
+        assert main(["remote", "add", "storage", ssh_url]) == 0
         assert main(["remote", "add", "cache", "remote://storage/tmp"]) == 0
         assert main(["config", "cache.ssh", "cache"]) == 0
 
         self.dvc.__init__()
 
-        assert self.dvc.cache.ssh.url == "ssh://localhost/tmp"
+        assert self.dvc.cache.ssh.path_info == ssh_url + "/tmp"
 
 
 class TestSharedCacheDir(TestDir):
@@ -151,7 +153,7 @@ class TestCmdCacheDir(TestDvc):
 
     def test_relative_path(self):
         tmpdir = self.mkdtemp()
-        dname = os.path.relpath(tmpdir)
+        dname = relpath(tmpdir)
         ret = main(["cache", "dir", dname])
         self.assertEqual(ret, 0)
 

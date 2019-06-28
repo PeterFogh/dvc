@@ -10,6 +10,12 @@ import logging.config
 import colorama
 
 
+class LoggingException(Exception):
+    def __init__(self, record):
+        msg = "failed to log {}".format(str(record))
+        super(LoggingException, self).__init__(msg)
+
+
 class ExcludeErrorsFilter(logging.Filter):
     def filter(self, record):
         return record.levelno < logging.ERROR
@@ -47,6 +53,9 @@ class ColorFormatter(logging.Formatter):
     )
 
     def format(self, record):
+        if self._is_visible(record):
+            self._progress_aware()
+
         if record.levelname == "INFO":
             return record.msg
 
@@ -74,6 +83,12 @@ class ColorFormatter(logging.Formatter):
             levelname=record.levelname,
             msg=record.msg,
         )
+
+    def _current_level(self):
+        return logging.getLogger("dvc").getEffectiveLevel()
+
+    def _is_visible(self, record):
+        return record.levelno >= self._current_level()
 
     def _description(self, message, exception):
         description = ""
@@ -117,7 +132,7 @@ class ColorFormatter(logging.Formatter):
 
         exception = ": ".join(exc_list)
 
-        if logging.getLogger("dvc").getEffectiveLevel() == logging.DEBUG:
+        if self._current_level() == logging.DEBUG:
             stack_trace = (
                 "\n" "{red}{line}{nc}\n" "{stack_trace}" "{red}{line}{nc}"
             ).format(
@@ -140,6 +155,12 @@ class ColorFormatter(logging.Formatter):
         progress.clearln()
 
 
+class LoggerHandler(logging.StreamHandler):
+    def handleError(self, record):
+        super(LoggerHandler, self).handleError(record)
+        raise LoggingException(record)
+
+
 def setup(level=logging.INFO):
     colorama.init()
 
@@ -150,14 +171,14 @@ def setup(level=logging.INFO):
             "formatters": {"color": {"()": ColorFormatter}},
             "handlers": {
                 "console": {
-                    "class": "logging.StreamHandler",
+                    "class": "dvc.logger.LoggerHandler",
                     "level": "DEBUG",
                     "formatter": "color",
                     "stream": "ext://sys.stdout",
                     "filters": ["exclude_errors"],
                 },
                 "console_errors": {
-                    "class": "logging.StreamHandler",
+                    "class": "dvc.logger.LoggerHandler",
                     "level": "ERROR",
                     "formatter": "color",
                     "stream": "ext://sys.stderr",
@@ -167,7 +188,11 @@ def setup(level=logging.INFO):
                 "dvc": {
                     "level": level,
                     "handlers": ["console", "console_errors"],
-                }
+                },
+                "paramiko": {
+                    "level": logging.CRITICAL,
+                    "handlers": ["console", "console_errors"],
+                },
             },
         }
     )
